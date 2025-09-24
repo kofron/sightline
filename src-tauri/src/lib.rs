@@ -1,0 +1,125 @@
+use std::sync::Mutex;
+
+pub mod api;
+mod timeline;
+
+pub struct AppState {
+    timeline: Mutex<timeline::Timeline>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        let timeline = timeline::Timeline::load().unwrap_or_default();
+        Self {
+            timeline: Mutex::new(timeline),
+        }
+    }
+
+    pub fn get_timeline(&self) -> std::sync::MutexGuard<'_, timeline::Timeline> {
+        self.timeline.lock().expect("timeline lock poisoned")
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub mod commands {
+    use super::*;
+    use chrono::{NaiveDate, Utc};
+    use serde::Serialize;
+    use tauri::State;
+
+    #[tauri::command]
+    pub fn entry_count(state: State<AppState>) -> Result<usize, String> {
+        let timeline = state.get_timeline();
+        Ok(timeline.entry_count())
+    }
+
+    #[tauri::command]
+    pub fn handle_edit(
+        state: State<AppState>,
+        payload: api::EditPayload,
+    ) -> Result<api::EditResponse, String> {
+        let mut timeline = state.get_timeline();
+
+        let mut inserts = Vec::with_capacity(payload.ops.len());
+        for op in payload.ops.iter() {
+            match op {
+                api::TextOperation::Insert { position, text } => {
+                    inserts.push(timeline::TimelineInsert {
+                        position: *position,
+                        date: Utc::now().date_naive(),
+                        text: text.clone(),
+                    })
+                }
+                api::TextOperation::Delete { .. } => {
+                    return Err("delete operations are not supported yet".into());
+                }
+            }
+        }
+
+        match timeline.apply_ops(payload.base_version, &inserts) {
+            Ok(new_version) => {
+                if let Err(err) = timeline.save() {
+                    tracing::warn!(?err, "failed to save timeline after edit");
+                }
+                Ok(api::EditResponse::Ok { new_version })
+            }
+            Err(timeline::ApplyOpsError::VersionMismatch { expected, .. }) => {
+                Ok(api::EditResponse::Conflict {
+                    server_version: expected,
+                })
+            }
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    #[tauri::command]
+    pub fn get_full_document(state: State<AppState>) -> Result<String, String> {
+        let timeline = state.get_timeline();
+        Ok(timeline.content())
+    }
+
+    #[derive(Debug, Serialize)]
+    pub struct DocumentSnapshot {
+        pub content: String,
+        pub version: u64,
+    }
+
+    #[tauri::command]
+    pub fn get_document_snapshot(state: State<AppState>) -> Result<DocumentSnapshot, String> {
+        let timeline = state.get_timeline();
+        Ok(DocumentSnapshot {
+            content: timeline.content(),
+            version: timeline.version(),
+        })
+    }
+
+    #[tauri::command]
+    pub fn get_log_for_date(state: State<AppState>, date: String) -> Result<String, String> {
+        let parsed = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+            .map_err(|err| format!("invalid date format: {err}"))?;
+
+        let timeline = state.get_timeline();
+        Ok(timeline.log_for_date(parsed).unwrap_or_else(String::new))
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .manage(AppState::new())
+        .invoke_handler(tauri::generate_handler![
+            commands::entry_count,
+            commands::handle_edit,
+            commands::get_full_document,
+            commands::get_document_snapshot,
+            commands::get_log_for_date
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
