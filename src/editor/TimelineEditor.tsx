@@ -5,6 +5,7 @@ import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
 import { ContentEditable } from "@lexical/react/LexicalContentEditable";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
+import LexicalErrorBoundary from "@lexical/react/LexicalErrorBoundary";
 import {
   $createParagraphNode,
   $createTextNode,
@@ -46,28 +47,31 @@ export function TimelineEditor({
   );
 
   return (
-    <LexicalComposer initialConfig={initialConfig}>
-      <DocumentContentPlugin
-        documentContent={document_content}
-        externalTextRef={externalTextRef}
-      />
-      <ChangeListenerPlugin
-        externalTextRef={externalTextRef}
-        onChange={on_change}
-      />
-      <EditorReadyPlugin onReady={register_editor} />
-      <PlainTextPlugin
-        contentEditable={
-          <ContentEditable
-            data-testid="timeline-editor-content"
-            className="timeline-editor__content"
-            aria-label="Timeline editor"
-          />
-        }
-        placeholder={null}
-      />
-      <HistoryPlugin />
-    </LexicalComposer>
+    <div className="timeline-editor">
+      <LexicalComposer initialConfig={initialConfig}>
+        <DocumentContentPlugin
+          documentContent={document_content}
+          externalTextRef={externalTextRef}
+        />
+        <ChangeListenerPlugin
+          externalTextRef={externalTextRef}
+          onChange={on_change}
+        />
+        <EditorReadyPlugin onReady={register_editor} />
+        <PlainTextPlugin
+          contentEditable={
+            <ContentEditable
+              data-testid="timeline-editor-content"
+              className="timeline-editor__content"
+              aria-label="Timeline editor"
+            />
+          }
+          placeholder={null}
+          ErrorBoundary={LexicalErrorBoundary}
+        />
+        <HistoryPlugin />
+      </LexicalComposer>
+    </div>
   );
 }
 

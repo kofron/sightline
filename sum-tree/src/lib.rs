@@ -696,10 +696,18 @@ impl<T: KeyedItem> SumTree<T> {
         {
             let mut cursor = self.cursor::<T::Key>(cx);
             let mut new_tree = cursor.slice(&item.key(), Bias::Left);
-            if let Some(cursor_item) = cursor.item()
-                && cursor_item.key() == item.key()
-            {
-                replaced = Some(cursor_item.clone());
+            let should_advance = if let Some(cursor_item) = cursor.item() {
+                if cursor_item.key() == item.key() {
+                    replaced = Some(cursor_item.clone());
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if should_advance {
                 cursor.next();
             }
             new_tree.push(item, cx);
@@ -715,10 +723,18 @@ impl<T: KeyedItem> SumTree<T> {
         *self = {
             let mut cursor = self.cursor::<T::Key>(cx);
             let mut new_tree = cursor.slice(key, Bias::Left);
-            if let Some(item) = cursor.item()
-                && item.key() == *key
-            {
-                removed = Some(item.clone());
+            let should_remove = if let Some(item) = cursor.item() {
+                if item.key() == *key {
+                    removed = Some(item.clone());
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if should_remove {
                 cursor.next();
             }
             new_tree.append(cursor.suffix(), cx);
@@ -759,10 +775,10 @@ impl<T: KeyedItem> SumTree<T> {
                     old_item = cursor.item();
                 }
 
-                if let Some(old_item) = old_item
-                    && old_item.key() == new_key
+                if let Some(to_remove) = old_item
+                    .and_then(|existing| (existing.key() == new_key).then(|| existing.clone()))
                 {
-                    removed.push(old_item.clone());
+                    removed.push(to_remove);
                     cursor.next();
                 }
 

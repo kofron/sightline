@@ -45,23 +45,31 @@ pub mod commands {
     ) -> Result<api::EditResponse, String> {
         let mut timeline = state.get_timeline();
 
-        let mut inserts = Vec::with_capacity(payload.ops.len());
+        let mut timeline_ops = Vec::with_capacity(payload.ops.len());
         for op in payload.ops.iter() {
             match op {
                 api::TextOperation::Insert { position, text } => {
-                    inserts.push(timeline::TimelineInsert {
-                        position: *position,
-                        date: Utc::now().date_naive(),
-                        text: text.clone(),
-                    })
+                    timeline_ops.push(timeline::TimelineOp::Insert(
+                        timeline::TimelineInsert {
+                            position: *position,
+                            date: Utc::now().date_naive(),
+                            text: text.clone(),
+                        },
+                    ))
                 }
-                api::TextOperation::Delete { .. } => {
-                    return Err("delete operations are not supported yet".into());
-                }
+                api::TextOperation::Delete {
+                    start_position,
+                    end_position,
+                } => timeline_ops.push(timeline::TimelineOp::Delete(
+                    timeline::TimelineDelete {
+                        start: *start_position,
+                        end: *end_position,
+                    },
+                )),
             }
         }
 
-        match timeline.apply_ops(payload.base_version, &inserts) {
+        match timeline.apply_ops(payload.base_version, &timeline_ops) {
             Ok(new_version) => {
                 if let Err(err) = timeline.save() {
                     tracing::warn!(?err, "failed to save timeline after edit");

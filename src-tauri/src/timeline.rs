@@ -78,12 +78,26 @@ pub struct TimelineInsert {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineDelete {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimelineOp {
+    Insert(TimelineInsert),
+    Delete(TimelineDelete),
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ApplyOpsError {
     #[error("version mismatch: expected {expected}, got {actual}")]
     VersionMismatch { expected: u64, actual: u64 },
     #[error("invalid position: {position}")]
     InvalidPosition { position: usize },
+    #[error("invalid range: {start}..{end}")]
+    InvalidRange { start: usize, end: usize },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -154,7 +168,7 @@ impl Timeline {
     pub fn apply_ops(
         &mut self,
         base_version: u64,
-        inserts: &[TimelineInsert],
+        ops: &[TimelineOp],
     ) -> Result<u64, ApplyOpsError> {
         if base_version != self.version {
             return Err(ApplyOpsError::VersionMismatch {
@@ -163,19 +177,25 @@ impl Timeline {
             });
         }
 
-        if inserts.is_empty() {
+        if ops.is_empty() {
             return Ok(self.version);
         }
 
         let mut entries = self.tree.items(());
 
-        for TimelineInsert {
-            position,
-            date,
-            text,
-        } in inserts
-        {
-            insert_text(&mut entries, *position, date, text.clone())?;
+        for op in ops {
+            match op {
+                TimelineOp::Insert(TimelineInsert {
+                    position,
+                    date,
+                    text,
+                }) => {
+                    insert_text(&mut entries, *position, date, text.clone())?;
+                }
+                TimelineOp::Delete(TimelineDelete { start, end }) => {
+                    delete_range(&mut entries, *start, *end)?;
+                }
+            }
         }
 
         self.tree = SumTree::from_iter(entries, ());
@@ -303,6 +323,71 @@ fn split_at_char(input: &str, char_index: usize) -> Option<(String, String)> {
     }
 }
 
+fn delete_range(
+    entries: &mut Vec<LogEntry>,
+    start: usize,
+    end: usize,
+) -> Result<(), ApplyOpsError> {
+    if start == end {
+        return Ok(());
+    }
+
+    if start > end {
+        return Err(ApplyOpsError::InvalidRange { start, end });
+    }
+
+    let total_chars: usize = entries.iter().map(LogEntry::char_count).sum();
+    if end > total_chars {
+        return Err(ApplyOpsError::InvalidRange { start, end });
+    }
+
+    let mut new_entries = Vec::with_capacity(entries.len());
+    let mut cursor = 0usize;
+
+    for entry in entries.iter() {
+        let entry_chars = entry.char_count();
+        let entry_start = cursor;
+        let entry_end = cursor + entry_chars;
+
+        if entry_end <= start || entry_start >= end {
+            new_entries.push(entry.clone());
+        } else {
+            let overlap_start = start.max(entry_start);
+            let overlap_end = end.min(entry_end);
+
+            if entry_start < overlap_start {
+                let prefix_len = overlap_start - entry_start;
+                let (prefix, _) = split_at_char(&entry.text, prefix_len)
+                    .ok_or(ApplyOpsError::InvalidRange { start, end })?;
+                if !prefix.is_empty() {
+                    new_entries.push(LogEntry {
+                        date: entry.date,
+                        text: prefix,
+                    });
+                }
+            }
+
+            if overlap_end < entry_end {
+                let suffix_len = entry_end - overlap_end;
+                let split_index = entry_chars - suffix_len;
+                let (_, suffix) = split_at_char(&entry.text, split_index)
+                    .ok_or(ApplyOpsError::InvalidRange { start, end })?;
+                if !suffix.is_empty() {
+                    new_entries.push(LogEntry {
+                        date: entry.date,
+                        text: suffix,
+                    });
+                }
+            }
+        }
+
+        cursor = entry_end;
+    }
+
+    *entries = new_entries;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,12 +395,12 @@ mod tests {
     use std::env;
     use tempfile::tempdir;
 
-    fn sample_insert(text: &str) -> TimelineInsert {
-        TimelineInsert {
+    fn sample_insert(text: &str) -> TimelineOp {
+        TimelineOp::Insert(TimelineInsert {
             position: 0,
             date: NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
             text: text.to_string(),
-        }
+        })
     }
 
     #[test]
@@ -351,11 +436,11 @@ mod tests {
         let new_version = timeline
             .apply_ops(
                 0,
-                &[TimelineInsert {
+                &[TimelineOp::Insert(TimelineInsert {
                     position: 0,
                     date,
                     text: "Happy New Year!".to_string(),
-                }],
+                })],
             )
             .expect("insert succeeds");
 
@@ -365,6 +450,104 @@ mod tests {
         assert_eq!(timeline.entry_count(), 1);
         assert_eq!(timeline.summary().min_date, Some(date));
         assert_eq!(timeline.summary().max_date, Some(date));
+    }
+
+    #[test]
+    fn apply_delete_removes_text() {
+        let mut timeline = Timeline::default();
+        let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+
+        timeline
+            .apply_ops(
+                0,
+                &[TimelineOp::Insert(TimelineInsert {
+                    position: 0,
+                    date,
+                    text: "abcdef".to_string(),
+                })],
+            )
+            .expect("initial insert succeeds");
+
+        let new_version = timeline
+            .apply_ops(
+                1,
+                &[TimelineOp::Delete(TimelineDelete { start: 2, end: 4 })],
+            )
+            .expect("delete succeeds");
+
+        assert_eq!(new_version, 2);
+        assert_eq!(timeline.version(), 2);
+        assert_eq!(timeline.content(), "abef");
+        assert_eq!(timeline.summary().total_chars, 4);
+    }
+
+    #[test]
+    fn apply_delete_spanning_entries_truncates_correctly() {
+        let mut timeline = Timeline::default();
+        let date_a = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
+        let date_b = NaiveDate::from_ymd_opt(2024, 2, 2).unwrap();
+
+        timeline
+            .apply_ops(
+                0,
+                &[TimelineOp::Insert(TimelineInsert {
+                    position: 0,
+                    date: date_a,
+                    text: "12345".to_string(),
+                })],
+            )
+            .expect("first insert succeeds");
+
+        let position = timeline.summary().total_chars;
+        timeline
+            .apply_ops(
+                1,
+                &[TimelineOp::Insert(TimelineInsert {
+                    position,
+                    date: date_b,
+                    text: "ABCDE".to_string(),
+                })],
+            )
+            .expect("second insert succeeds");
+
+        let new_version = timeline
+            .apply_ops(
+                2,
+                &[TimelineOp::Delete(TimelineDelete { start: 3, end: 7 })],
+            )
+            .expect("delete succeeds");
+
+        assert_eq!(new_version, 3);
+        assert_eq!(timeline.version(), 3);
+        assert_eq!(timeline.content(), "123CDE");
+        assert_eq!(timeline.summary().total_chars, 6);
+    }
+
+    #[test]
+    fn apply_delete_out_of_bounds_returns_error() {
+        let mut timeline = Timeline::default();
+        let date = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+
+        timeline
+            .apply_ops(
+                0,
+                &[TimelineOp::Insert(TimelineInsert {
+                    position: 0,
+                    date,
+                    text: "short".to_string(),
+                })],
+            )
+            .expect("insert succeeds");
+
+        let result = timeline.apply_ops(
+            1,
+            &[TimelineOp::Delete(TimelineDelete { start: 0, end: 10 })],
+        );
+
+        assert_eq!(
+            result.expect_err("delete should fail"),
+            ApplyOpsError::InvalidRange { start: 0, end: 10 }
+        );
     }
 
     #[test]
