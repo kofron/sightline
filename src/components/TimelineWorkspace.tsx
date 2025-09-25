@@ -49,8 +49,8 @@ export function TimelineWorkspace({
   const [documentContent, setDocumentContent] = useState("");
   const [isInitialized, setIsInitialized] = useState(false);
   const [reflectState, setReflectState] = useState<ReflectState>('hidden');
-  const [sessionDocument, setSessionDocument] = useState("");
-  const [, setIsSessionLoading] = useState(false);
+  const [isSessionLoading, setIsSessionLoading] = useState(false);
+  const [isDailyLogEmpty, setIsDailyLogEmpty] = useState(true);
   const [currentDate, setCurrentDate] = useState<string>(formatDateForDisplay(new Date()));
   const [isAtToday, setIsAtToday] = useState(true);
   const editorRef = useRef<HTMLDivElement>(null!);
@@ -166,13 +166,6 @@ export function TimelineWorkspace({
     [scheduleFlush],
   );
 
-  const handleSessionEditorChange = useCallback(
-    (_operations: TextOperation[], nextText: string) => {
-      setSessionDocument(nextText);
-    },
-    [],
-  );
-
   const openReflectSession = useCallback(() => {
     if (reflectState !== 'ready') {
       return;
@@ -181,16 +174,16 @@ export function TimelineWorkspace({
     const today = formatDateForApi(new Date());
     setReflectState('active');
     setIsSessionLoading(true);
-    setSessionDocument("");
+    setIsDailyLogEmpty(true);
 
     invokeFn<string>("get_log_for_date", { date: today })
       .then((content) => {
-        setSessionDocument(content);
+        setIsDailyLogEmpty(content.trim().length === 0);
       })
       .catch((err) => {
         const message = err instanceof Error ? err.message : String(err);
         console.error("failed to load daily log", message);
-        setSessionDocument("");
+        setIsDailyLogEmpty(true);
       })
       .finally(() => {
         setIsSessionLoading(false);
@@ -199,13 +192,11 @@ export function TimelineWorkspace({
 
   const cancelReflectSession = useCallback(() => {
     setReflectState('ready');
-    setSessionDocument("");
     setIsSessionLoading(false);
   }, []);
 
   const completeReflectSession = useCallback(() => {
     setReflectState('ready');
-    setSessionDocument("");
     setIsSessionLoading(false);
   }, []);
 
@@ -254,63 +245,82 @@ export function TimelineWorkspace({
       </div>
 
       {/* Center editor - 80% width */}
-      <div className="flex-1 flex flex-col relative min-h-0">
-        <div className="flex-1 relative min-h-0" ref={editorRef}>
-          <Editor
-            document_content={reflectState === 'active' ? sessionDocument : documentContent}
-            on_change={reflectState === 'active' ? handleSessionEditorChange : handleEditorChange}
-            scroll_container_ref={editorRef}
-            scroll_to_bottom={isInitialized && isAtToday && reflectState !== 'active'}
-          />
-        </div>
+      <div className="flex-1 flex flex-col relative min-h-0" ref={editorRef}>
+        <Editor
+          document_content={documentContent}
+          on_change={handleEditorChange}
+          scroll_container_ref={editorRef}
+          scroll_to_bottom={isInitialized && isAtToday}
+        />
 
-        {/* Reflect button - only shows when at today */}
+        {/* Reflect button - bottom right when ready */}
         {reflectState === 'ready' && (
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10">
+          <div className="absolute bottom-6 right-6 z-50 pointer-events-auto">
             <Button
               onClick={openReflectSession}
               className="shadow-lg"
               data-testid="reflect-button"
+              type="button"
             >
               Reflect
             </Button>
           </div>
         )}
 
-        {/* Active reflect controls */}
         {reflectState === 'active' && (
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10 flex gap-2">
-            <Button
-              variant="outline"
-              onClick={cancelReflectSession}
-              data-testid="cancel-button"
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={completeReflectSession}
-              data-testid="done-button"
-            >
-              Done
-            </Button>
-          </div>
+          <ReflectOverlay
+            onCancel={cancelReflectSession}
+            onComplete={completeReflectSession}
+            isLoading={isSessionLoading}
+            ChatPaneComponent={ChatPaneView}
+            isDailyLogEmpty={isDailyLogEmpty}
+          />
         )}
       </div>
+    </div>
+  );
+}
 
-      {/* Right chat panel - slides in */}
-      <div className={cn(
-        "w-80 border-l border-border bg-card transition-transform duration-300 ease-in-out flex flex-col absolute top-0 right-0 h-full z-20",
-        reflectState === 'active' ? "translate-x-0" : "translate-x-full"
-      )}>
-        <div className="p-4 border-b border-border">
+interface ReflectOverlayProps {
+  onCancel: () => void;
+  onComplete: () => void;
+  isLoading: boolean;
+  ChatPaneComponent: ComponentType<ChatPaneProps>;
+  isDailyLogEmpty: boolean;
+}
+
+function ReflectOverlay({
+  onCancel,
+  onComplete,
+  isLoading,
+  ChatPaneComponent,
+  isDailyLogEmpty,
+}: ReflectOverlayProps) {
+  return (
+    <div className="fixed bottom-20 right-6 z-40 w-[min(28rem,calc(100vw-3rem))] max-h-[85vh]">
+      <div className="rounded-xl border border-border bg-card shadow-2xl flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between p-4 border-b border-border">
           <h2 className="font-semibold text-lg">Daily Reflection</h2>
+          <Button variant="ghost" size="sm" onClick={onCancel}>
+            Close
+          </Button>
         </div>
         <div className="flex-1 overflow-hidden">
-          {reflectState === 'active' && (
-            <ChatPaneView
-              isDailyLogEmpty={sessionDocument.trim().length === 0}
-            />
+          {isLoading ? (
+            <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
+              Loading daily log…
+            </div>
+          ) : (
+            <ChatPaneComponent isDailyLogEmpty={isDailyLogEmpty} />
           )}
+        </div>
+        <div className="flex justify-end gap-2 p-4 border-t border-border">
+          <Button variant="outline" onClick={onCancel} data-testid="cancel-button">
+            Cancel
+          </Button>
+          <Button onClick={onComplete} data-testid="done-button">
+            Done
+          </Button>
         </div>
       </div>
     </div>
