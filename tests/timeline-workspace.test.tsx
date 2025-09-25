@@ -1,7 +1,8 @@
-import { describe, expect, it, beforeEach, vi } from "bun:test";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, beforeEach, afterEach, vi } from "bun:test";
+import { act, fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 
 import TimelineWorkspace from "../src/components/TimelineWorkspace";
+
 import type { TextOperation } from "../src/api/types";
 import type { TimelineEditorProps } from "../src/editor/TimelineEditor";
 
@@ -17,6 +18,15 @@ function StubEditor({ document_content, on_change }: TimelineEditorProps) {
   editorState.content = document_content;
   return <div data-testid="mock-editor">{document_content}</div>;
 }
+
+function StubChatPane() {
+  return <div data-testid="chat-pane-stub" />;
+}
+
+
+afterEach(() => {
+  cleanup();
+});
 
 beforeEach(() => {
   editorState.onChange = null;
@@ -39,7 +49,7 @@ describe("TimelineWorkspace", () => {
       },
     );
 
-    render(<TimelineWorkspace invokeApi={invoke} EditorComponent={StubEditor} />);
+    render(<TimelineWorkspace invokeApi={invoke} EditorComponent={StubEditor} ChatPaneComponent={StubChatPane} />);
 
     await waitFor(() => {
       const editors = screen.getAllByTestId("mock-editor");
@@ -93,7 +103,7 @@ describe("TimelineWorkspace", () => {
       },
     );
 
-    render(<TimelineWorkspace invokeApi={invoke} EditorComponent={StubEditor} />);
+    render(<TimelineWorkspace invokeApi={invoke} EditorComponent={StubEditor} ChatPaneComponent={StubChatPane} />);
 
     await waitFor(() => {
       const editors = screen.getAllByTestId("mock-editor");
@@ -133,5 +143,52 @@ describe("TimelineWorkspace", () => {
       const editors = screen.getAllByTestId("mock-editor");
       expect(editors.at(-1)?.textContent).toBe("Canonical document");
     });
+  });  it("opens and closes the collaborative session view", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const invoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "get_document_snapshot":
+            return { content: "Initial doc", version: 1 };
+          case "get_log_for_date":
+            expect(args).toEqual({ date: today });
+            return "Today log";
+          default:
+            throw new Error(`Unexpected command: ${command}`);
+        }
+      },
+    );
+
+    render(<TimelineWorkspace invokeApi={invoke} EditorComponent={StubEditor} ChatPaneComponent={StubChatPane} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("timeline-main-view").textContent).toBe("Initial doc");
+    });
+
+    const reflectButton = screen.getByTestId("reflect-button");
+    act(() => {
+      fireEvent.click(reflectButton);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("collaborative-session-view")).not.toBeNull();
+    });
+
+    await waitFor(() => {
+      const sessionEditor = screen.getByTestId("mock-editor");
+      expect(sessionEditor.textContent).toBe("Today log");
+    });
+
+    const closeButton = screen.getByTestId("close-session-button");
+    act(() => {
+      fireEvent.click(closeButton);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("timeline-main-view").textContent).toBe("Initial doc");
+    });
+    expect(screen.queryByTestId("collaborative-session-view")).toBeNull();
   });
+
+
 });

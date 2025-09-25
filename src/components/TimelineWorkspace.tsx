@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
 import TimelineEditor from "../editor/TimelineEditor";
+import ChatPane, { type ChatPaneProps } from "./ChatPane";
 import type { DocumentSnapshot, TextOperation } from "../api/types";
 import TimelineSyncController, {
   type InvokeFn,
@@ -10,20 +11,33 @@ import TimelineSyncController, {
 interface TimelineWorkspaceProps {
   invokeApi?: InvokeFn;
   EditorComponent?: typeof TimelineEditor;
+  ChatPaneComponent?: ComponentType<ChatPaneProps>;
 }
 
 const defaultInvoke: InvokeFn = (command, args) =>
   tauriInvoke(command, args as Record<string, unknown> | undefined);
 
+function formatDateForApi(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export function TimelineWorkspace({
   invokeApi = defaultInvoke,
   EditorComponent,
+  ChatPaneComponent,
 }: TimelineWorkspaceProps) {
   const controllerRef = useRef<TimelineSyncController | null>(null);
   const [documentContent, setDocumentContent] = useState("");
   const [isInitialized, setIsInitialized] = useState(false);
+  const [isSessionOpen, setIsSessionOpen] = useState(false);
+  const [sessionDocument, setSessionDocument] = useState("");
+  const [isSessionLoading, setIsSessionLoading] = useState(false);
 
   const Editor = EditorComponent ?? TimelineEditor;
+  const ChatPaneView = ChatPaneComponent ?? ChatPane;
 
   const invokeFn = useMemo(() => invokeApi, [invokeApi]);
 
@@ -88,9 +102,96 @@ export function TimelineWorkspace({
     [isInitialized],
   );
 
+  const handleSessionEditorChange = useCallback(
+    (_operations: TextOperation[], nextText: string) => {
+      setSessionDocument(nextText);
+    },
+    [],
+  );
+
+  const openCollaborativeSession = useCallback(() => {
+    if (isSessionOpen) {
+      return;
+    }
+
+    const today = formatDateForApi(new Date());
+    setIsSessionOpen(true);
+    setIsSessionLoading(true);
+    setSessionDocument("");
+
+    invokeFn<string>("get_log_for_date", { date: today })
+      .then((content) => {
+        setSessionDocument(content);
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("failed to load daily log", message);
+        setSessionDocument("");
+      })
+      .finally(() => {
+        setIsSessionLoading(false);
+      });
+  }, [invokeFn, isSessionOpen]);
+
+  const closeCollaborativeSession = useCallback(() => {
+    setIsSessionOpen(false);
+    setSessionDocument("");
+    setIsSessionLoading(false);
+  }, []);
+
   return (
     <section className="timeline-workspace" data-initialized={isInitialized}>
-      <Editor document_content={documentContent} on_change={handleEditorChange} />
+      <div className="timeline-workspace__toolbar">
+        {!isSessionOpen && (
+          <button
+            type="button"
+            className="timeline-workspace__reflect"
+            onClick={openCollaborativeSession}
+            data-testid="reflect-button"
+          >
+            Reflect
+          </button>
+        )}
+      </div>
+
+      {!isSessionOpen ? (
+        <div
+          className="timeline-workspace__main"
+          data-testid="timeline-main-view"
+        >
+          <Editor
+            document_content={documentContent}
+            on_change={handleEditorChange}
+          />
+        </div>
+      ) : (
+        <div
+          className="collaborative-session"
+          data-testid="collaborative-session-view"
+          data-loading={isSessionLoading}
+        >
+          <div className="collaborative-session__toolbar">
+            <button
+              type="button"
+              onClick={closeCollaborativeSession}
+              data-testid="close-session-button"
+            >
+              Close
+            </button>
+          </div>
+          <div className="collaborative-session__panes">
+            <div className="collaborative-session__pane collaborative-session__pane--editor">
+              <Editor
+                document_content={sessionDocument}
+                on_change={handleSessionEditorChange}
+              />
+            </div>
+            <div className="collaborative-session__pane collaborative-session__pane--chat">
+              <ChatPaneView isDailyLogEmpty={sessionDocument.trim().length === 0} />
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

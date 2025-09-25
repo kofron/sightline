@@ -59,7 +59,10 @@ fn build_test_app() -> (
             commands::handle_edit,
             commands::get_full_document,
             commands::get_document_snapshot,
-            commands::get_log_for_date
+            commands::get_log_for_date,
+            commands::search_prefix,
+            commands::search_infix,
+            commands::autocomplete_tag
         ])
         .build(mock_context(noop_assets()))
         .expect("failed to build app");
@@ -160,10 +163,10 @@ fn get_log_for_date_returns_entries_for_requested_day() {
     let env_guard = TimelineEnvGuard::new();
     let snapshot = json!({
         "version": 3,
-        "entries": [
-            {"date": "2024-12-30", "text": "Day before\n"},
-            {"date": "2024-12-31", "text": "Morning tasks\n"},
-            {"date": "2024-12-31", "text": "Evening review\n"}
+        "blocks": [
+            {"date": "2024-12-30", "text": "Day before\n", "tags": []},
+            {"date": "2024-12-31", "text": "Morning tasks\n", "tags": []},
+            {"date": "2024-12-31", "text": "Evening review\n", "tags": []}
         ]
     });
 
@@ -188,8 +191,8 @@ fn get_document_snapshot_returns_content_and_version() {
     let env_guard = TimelineEnvGuard::new();
     let snapshot = json!({
         "version": 7,
-        "entries": [
-            {"date": "2025-01-01", "text": "Happy New Year!"}
+        "blocks": [
+            {"date": "2025-01-01", "text": "Happy New Year!", "tags": []}
         ]
     });
 
@@ -210,4 +213,60 @@ fn get_document_snapshot_returns_content_and_version() {
             "version": 7
         })
     );
+}
+
+fn write_search_snapshot(path: &PathBuf) {
+    let snapshot = json!({
+        "version": 1,
+        "blocks": [
+            {"date": "2024-01-01", "text": "Sightline planning", "tags": [2]},
+            {"date": "2024-01-02", "text": "Home improvements", "tags": [3]},
+            {"date": "2024-01-03", "text": "Journal entry", "tags": [5]}
+        ],
+        "tag_registry": [
+            {"id": 1, "name": "project", "parent_id": null},
+            {"id": 2, "name": "sightline", "parent_id": 1},
+            {"id": 3, "name": "home", "parent_id": 1},
+            {"id": 4, "name": "type", "parent_id": null},
+            {"id": 5, "name": "journal", "parent_id": 4}
+        ]
+    });
+
+    fs::write(path, serde_json::to_string_pretty(&snapshot).unwrap()).expect("write snapshot");
+}
+
+#[test]
+fn search_prefix_command_returns_matching_block_ids() {
+    let env_guard = TimelineEnvGuard::new();
+    write_search_snapshot(env_guard.path());
+
+    let (_app, webview) = build_test_app();
+    let response = invoke_command(&webview, "search_prefix", json!({"query": "#project"}));
+
+    assert_eq!(response, json!([0, 1]));
+}
+
+#[test]
+fn search_infix_command_returns_partial_matches() {
+    let env_guard = TimelineEnvGuard::new();
+    write_search_snapshot(env_guard.path());
+
+    let (_app, webview) = build_test_app();
+    let response = invoke_command(&webview, "search_infix", json!({"query": "sight"}));
+
+    assert_eq!(response, json!([0]));
+}
+
+#[test]
+fn autocomplete_tag_command_returns_canonical_tags() {
+    let env_guard = TimelineEnvGuard::new();
+    write_search_snapshot(env_guard.path());
+
+    let (_app, webview) = build_test_app();
+    let response = invoke_command(&webview, "autocomplete_tag", json!({"query": "#pro"}));
+
+    let tags: Vec<String> = serde_json::from_value(response).expect("parse tag list");
+    assert!(tags.contains(&"#project".to_string()));
+    assert!(tags.contains(&"#project:sightline".to_string()));
+    assert!(tags.contains(&"#project:home".to_string()));
 }

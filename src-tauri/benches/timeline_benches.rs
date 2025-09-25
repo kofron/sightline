@@ -5,7 +5,7 @@ use proptest::prelude::*;
 use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 use sightline_lib::api::TextOperation;
-use sightline_lib::timeline::{LogEntry, Timeline};
+use sightline_lib::timeline::{TaggedBlock, Timeline};
 use sum_tree::{SumTree, TREE_BASE};
 
 fn arb_op(doc_len: usize) -> BoxedStrategy<TextOperation> {
@@ -98,12 +98,13 @@ fn node_split_benchmark(c: &mut Criterion) {
     c.bench_function("timeline_node_split", |b| {
         b.iter_with_setup(
             || {
-                let mut tree = SumTree::<LogEntry>::new(());
+                let mut tree = SumTree::<TaggedBlock>::new(());
                 for _ in 0..NODE_PRE_SPLIT_CAPACITY {
                     tree.push(
-                        LogEntry {
+                        TaggedBlock {
                             date,
                             text: "a".to_string(),
+                            tags: Vec::new(),
                         },
                         (),
                     );
@@ -112,9 +113,10 @@ fn node_split_benchmark(c: &mut Criterion) {
             },
             |mut tree| {
                 tree.push(
-                    LogEntry {
+                    TaggedBlock {
                         date,
                         text: "a".to_string(),
+                        tags: Vec::new(),
                     },
                     (),
                 );

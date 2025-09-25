@@ -1,21 +1,349 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::{cmp, env};
 
 use crate::api::TextOperation;
+use bloomfilter::Bloom;
 use chrono::NaiveDate;
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
 use sum_tree::{Bias, Dimension, Item, SumTree, Summary};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LogEntry {
-    pub date: NaiveDate,
-    pub text: String,
+const TAG_FILTER_CAPACITY: usize = 256;
+const TAG_FILTER_FALSE_POSITIVE_RATE: f64 = 0.01;
+const TAG_FILTER_SEED: [u8; 32] = [0; 32];
+
+fn new_tag_filter() -> Bloom<u32> {
+    Bloom::new_for_fp_rate_with_seed(
+        TAG_FILTER_CAPACITY,
+        TAG_FILTER_FALSE_POSITIVE_RATE,
+        &TAG_FILTER_SEED,
+    )
+    .expect("failed to create tag bloom filter")
 }
 
-impl LogEntry {
+fn union_tag_filters(target: &mut Bloom<u32>, source: &Bloom<u32>) {
+    if source.is_empty() {
+        return;
+    }
+
+    if target.is_empty() {
+        *target = source.clone();
+        return;
+    }
+
+    let mut target_bytes = target.to_bytes();
+    let source_bytes = source.as_slice();
+    assert_eq!(
+        target_bytes.len(),
+        source_bytes.len(),
+        "tag bloom filters must have matching sizes",
+    );
+
+    let bit_bytes = ((target.len() as usize) + 7) / 8;
+    let header_len = target_bytes.len() - bit_bytes;
+
+    for (dst, src) in target_bytes[header_len..]
+        .iter_mut()
+        .zip(&source_bytes[header_len..])
+    {
+        *dst |= *src;
+    }
+
+    *target = Bloom::from_bytes(target_bytes).expect("failed to rebuild tag bloom filter");
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tag {
+    pub id: u32,
+    pub name: String,
+    pub parent_id: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TagRegistry {
+    tags: HashMap<u32, Tag>,
+    index: HashMap<Option<u32>, HashMap<String, u32>>,
+    next_id: u32,
+}
+
+impl TagRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tags.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+    }
+
+    pub fn get_tag(&self, id: u32) -> Option<&Tag> {
+        self.tags.get(&id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Tag> {
+        self.tags.values()
+    }
+
+    pub fn find_id(&self, parent_id: Option<u32>, name: &str) -> Option<u32> {
+        self.index
+            .get(&parent_id)
+            .and_then(|by_name| by_name.get(name))
+            .copied()
+    }
+
+    pub fn intern_segment(&mut self, parent_id: Option<u32>, name: &str) -> u32 {
+        self.intern_segment_with_id(parent_id, name, None)
+    }
+
+    pub fn intern_path<'a, I>(&mut self, segments: I) -> Option<u32>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut parent_id = None;
+        let mut last_id = None;
+
+        for segment in segments.into_iter() {
+            let name = segment.trim();
+            if name.is_empty() {
+                continue;
+            }
+
+            let id = self.intern_segment(parent_id, name);
+            parent_id = Some(id);
+            last_id = Some(id);
+        }
+
+        last_id
+    }
+
+    pub fn intern_colon_path(&mut self, path: &str) -> Option<u32> {
+        self.intern_path(path.split(':').filter_map(|segment| {
+            let trimmed = segment.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }))
+    }
+
+    pub fn full_name(&self, id: u32) -> Option<String> {
+        let mut segments = Vec::new();
+        let mut current_id = Some(id);
+        let mut guard = 0usize;
+
+        while let Some(tag_id) = current_id {
+            guard += 1;
+            if guard > self.tags.len().saturating_add(1) {
+                return None;
+            }
+
+            let tag = self.tags.get(&tag_id)?;
+            segments.push(tag.name.clone());
+            current_id = tag.parent_id;
+        }
+
+        if segments.is_empty() {
+            return None;
+        }
+
+        segments.reverse();
+        Some(segments.join(":"))
+    }
+
+    pub fn tag_ids_with_prefix(&self, query: &str) -> Vec<u32> {
+        self.filter_tag_ids(query, |name, normalized| name.starts_with(normalized))
+    }
+
+    pub fn tag_ids_with_infix(&self, query: &str) -> Vec<u32> {
+        self.filter_tag_ids(query, |name, normalized| name.contains(normalized))
+    }
+
+    pub fn autocomplete_names(&self, query: &str) -> Vec<String> {
+        let normalized = Self::normalize_query(query);
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+
+        let mut names: Vec<String> = self
+            .tag_names()
+            .into_iter()
+            .map(|(_, name)| name)
+            .filter(|name| name.to_lowercase().starts_with(&normalized))
+            .map(|name| format!("#{name}"))
+            .collect();
+
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn filter_tag_ids<F>(&self, query: &str, predicate: F) -> Vec<u32>
+    where
+        F: Fn(&str, &str) -> bool,
+    {
+        let normalized = Self::normalize_query(query);
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+
+        self.tag_names()
+            .into_iter()
+            .filter(|(_, name)| predicate(&name.to_lowercase(), &normalized))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    fn tag_names(&self) -> Vec<(u32, String)> {
+        self.tags
+            .values()
+            .filter_map(|tag| self.full_name(tag.id).map(|name| (tag.id, name)))
+            .collect()
+    }
+
+    fn normalize_query(query: &str) -> String {
+        query.trim().trim_start_matches('#').to_lowercase()
+    }
+
+    fn intern_segment_with_id(
+        &mut self,
+        parent_id: Option<u32>,
+        name: &str,
+        desired_id: Option<u32>,
+    ) -> u32 {
+        if let Some(existing) = self.find_id(parent_id, name) {
+            return existing;
+        }
+
+        if let Some(parent) = parent_id {
+            if !self.tags.contains_key(&parent) {
+                panic!("parent tag {parent} does not exist");
+            }
+        }
+
+        let id = desired_id.unwrap_or_else(|| self.next_available_id());
+
+        if self.tags.contains_key(&id) {
+            panic!("tag id {id} already exists");
+        }
+
+        let name_string = name.to_string();
+        let tag = Tag {
+            id,
+            name: name_string.clone(),
+            parent_id,
+        };
+        self.tags.insert(id, tag);
+        self.index
+            .entry(parent_id)
+            .or_default()
+            .insert(name_string, id);
+        self.bump_next_id(id);
+        id
+    }
+
+    fn next_available_id(&mut self) -> u32 {
+        let mut id = self.next_id;
+        while self.tags.contains_key(&id) {
+            id = id.wrapping_add(1);
+            if id == self.next_id {
+                panic!("tag registry exhausted");
+            }
+        }
+        self.next_id = id.wrapping_add(1);
+        id
+    }
+
+    fn bump_next_id(&mut self, id: u32) {
+        let next = id.wrapping_add(1);
+        if self.next_id <= id {
+            self.next_id = next;
+        }
+    }
+
+    fn from_map(id_to_tag: HashMap<u32, String>) -> Self {
+        let mut registry = Self::new();
+
+        let mut entries: Vec<(u32, String)> = id_to_tag.into_iter().collect();
+        entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+        for (id, path) in entries {
+            let mut parent = None;
+            let segments: Vec<&str> = path.split(':').collect();
+            if segments.is_empty() {
+                continue;
+            }
+
+            for (index, segment) in segments.iter().enumerate() {
+                let desired_id = if index == segments.len() - 1 {
+                    Some(id)
+                } else {
+                    None
+                };
+
+                let trimmed = segment.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let tag_id = registry.intern_segment_with_id(parent, trimmed, desired_id);
+                parent = Some(tag_id);
+            }
+        }
+
+        registry
+    }
+
+    fn from_tags(tags: Vec<Tag>) -> Self {
+        let mut registry = Self {
+            tags: tags.into_iter().map(|tag| (tag.id, tag)).collect(),
+            index: HashMap::new(),
+            next_id: 0,
+        };
+        registry.rebuild_indexes();
+        registry
+    }
+
+    fn export(&self) -> Vec<Tag> {
+        let mut tags: Vec<Tag> = self.tags.values().cloned().collect();
+        tags.sort_by(|a, b| a.id.cmp(&b.id));
+        tags
+    }
+
+    fn rebuild_indexes(&mut self) {
+        self.index.clear();
+        for tag in self.tags.values() {
+            self.index
+                .entry(tag.parent_id)
+                .or_default()
+                .insert(tag.name.clone(), tag.id);
+        }
+
+        self.next_id = self
+            .tags
+            .keys()
+            .copied()
+            .max()
+            .map(|max| max.wrapping_add(1))
+            .unwrap_or(0);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaggedBlock {
+    pub date: NaiveDate,
+    pub text: String,
+    #[serde(default)]
+    pub tags: Vec<u32>,
+}
+
+impl TaggedBlock {
     fn char_count(&self) -> usize {
         self.text.chars().count()
     }
@@ -25,13 +353,47 @@ impl LogEntry {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+impl Item for TaggedBlock {
+    type Summary = TimelineSummary;
+
+    fn summary(&self, (): ()) -> Self::Summary {
+        let mut tags_filter = new_tag_filter();
+        for tag_id in &self.tags {
+            tags_filter.set(tag_id);
+        }
+
+        TimelineSummary {
+            total_bytes: self.byte_count(),
+            total_chars: self.char_count(),
+            entry_count: 1,
+            min_date: Some(self.date),
+            max_date: Some(self.date),
+            tags_filter,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct TimelineSummary {
     pub total_bytes: usize,
     pub total_chars: usize,
     pub entry_count: usize,
     pub min_date: Option<NaiveDate>,
     pub max_date: Option<NaiveDate>,
+    pub tags_filter: Bloom<u32>,
+}
+
+impl Default for TimelineSummary {
+    fn default() -> Self {
+        Self {
+            total_bytes: 0,
+            total_chars: 0,
+            entry_count: 0,
+            min_date: None,
+            max_date: None,
+            tags_filter: new_tag_filter(),
+        }
+    }
 }
 
 impl Summary for TimelineSummary {
@@ -55,20 +417,7 @@ impl Summary for TimelineSummary {
             (None, other) => other,
             (current, None) => current,
         };
-    }
-}
-
-impl Item for LogEntry {
-    type Summary = TimelineSummary;
-
-    fn summary(&self, (): ()) -> Self::Summary {
-        TimelineSummary {
-            total_bytes: self.byte_count(),
-            total_chars: self.char_count(),
-            entry_count: 1,
-            min_date: Some(self.date),
-            max_date: Some(self.date),
-        }
+        union_tag_filters(&mut self.tags_filter, &summary.tags_filter);
     }
 }
 
@@ -93,7 +442,7 @@ impl<'a> Dimension<'a, TimelineSummary> for Chars {
     }
 }
 
-impl EditableTimeline for SumTree<LogEntry> {
+impl EditableTimeline for SumTree<TaggedBlock> {
     fn apply_ops(
         &mut self,
         ops: &[TextOperation],
@@ -118,7 +467,7 @@ impl EditableTimeline for SumTree<LogEntry> {
 }
 
 fn apply_insert(
-    tree: &mut SumTree<LogEntry>,
+    tree: &mut SumTree<TaggedBlock>,
     position: usize,
     text: &str,
     date: NaiveDate,
@@ -151,18 +500,20 @@ fn apply_insert(
 
         if !left_fragment.is_empty() {
             left_tree.push(
-                LogEntry {
+                TaggedBlock {
                     date: current.date,
                     text: left_fragment,
+                    tags: current.tags.clone(),
                 },
                 (),
             );
         }
 
         left_tree.push(
-            LogEntry {
+            TaggedBlock {
                 date,
                 text: text.to_string(),
+                tags: Vec::new(),
             },
             (),
         );
@@ -170,9 +521,10 @@ fn apply_insert(
         let mut right_tree = SumTree::new(());
         if !right_fragment.is_empty() {
             right_tree.push(
-                LogEntry {
+                TaggedBlock {
                     date: current.date,
                     text: right_fragment,
+                    tags: current.tags.clone(),
                 },
                 (),
             );
@@ -183,9 +535,10 @@ fn apply_insert(
         left_tree.append(right_tree, ());
     } else {
         left_tree.push(
-            LogEntry {
+            TaggedBlock {
                 date,
                 text: text.to_string(),
+                tags: Vec::new(),
             },
             (),
         );
@@ -199,7 +552,7 @@ fn apply_insert(
 }
 
 fn apply_delete(
-    tree: &mut SumTree<LogEntry>,
+    tree: &mut SumTree<TaggedBlock>,
     start: usize,
     end: usize,
 ) -> Result<(), ApplyOpsError> {
@@ -235,9 +588,10 @@ fn apply_delete(
 
         if !left_fragment.is_empty() {
             left_tree.push(
-                LogEntry {
+                TaggedBlock {
                     date: current.date,
                     text: left_fragment,
+                    tags: current.tags.clone(),
                 },
                 (),
             );
@@ -266,9 +620,10 @@ fn apply_delete(
 
         if !tail.is_empty() {
             right_tree.push(
-                LogEntry {
+                TaggedBlock {
                     date: item.date,
                     text: tail,
+                    tags: item.tags.clone(),
                 },
                 (),
             );
@@ -310,15 +665,26 @@ pub enum TimelinePersistenceError {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum TagRegistrySnapshot {
+    Hierarchical(Vec<Tag>),
+    Flat(HashMap<String, String>),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct TimelineSnapshot {
     version: u64,
-    entries: Vec<LogEntry>,
+    #[serde(alias = "entries")]
+    blocks: Vec<TaggedBlock>,
+    #[serde(default)]
+    tag_registry: Option<TagRegistrySnapshot>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Timeline {
-    tree: SumTree<LogEntry>,
+    tree: SumTree<TaggedBlock>,
     version: u64,
+    tag_registry: TagRegistry,
 }
 
 impl Timeline {
@@ -332,6 +698,14 @@ impl Timeline {
 
     pub fn entry_count(&self) -> usize {
         self.summary().entry_count
+    }
+
+    pub fn tag_registry(&self) -> &TagRegistry {
+        &self.tag_registry
+    }
+
+    pub fn tag_registry_mut(&mut self) -> &mut TagRegistry {
+        &mut self.tag_registry
     }
 
     pub fn content(&self) -> String {
@@ -364,6 +738,20 @@ impl Timeline {
         }
     }
 
+    pub fn search_prefix(&self, query: &str) -> Vec<u32> {
+        let tag_ids = self.tag_registry.tag_ids_with_prefix(query);
+        self.block_ids_with_tags(&tag_ids)
+    }
+
+    pub fn search_infix(&self, query: &str) -> Vec<u32> {
+        let tag_ids = self.tag_registry.tag_ids_with_infix(query);
+        self.block_ids_with_tags(&tag_ids)
+    }
+
+    pub fn autocomplete_tags(&self, query: &str) -> Vec<String> {
+        self.tag_registry.autocomplete_names(query)
+    }
+
     pub fn apply_ops(
         &mut self,
         base_version: u64,
@@ -386,6 +774,26 @@ impl Timeline {
         Ok(self.version)
     }
 
+    fn block_ids_with_tags(&self, tag_ids: &[u32]) -> Vec<u32> {
+        if tag_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let matching: HashSet<u32> = tag_ids.iter().copied().collect();
+
+        self.tree
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| {
+                if block.tags.iter().any(|tag| matching.contains(tag)) {
+                    u32::try_from(index).ok()
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn save(&self) -> Result<(), TimelinePersistenceError> {
         let path = get_storage_path()?;
         self.save_to_path(path)
@@ -397,9 +805,15 @@ impl Timeline {
             fs::create_dir_all(parent)?;
         }
 
+        let exported_tags = self.tag_registry.export();
         let snapshot = TimelineSnapshot {
             version: self.version,
-            entries: self.tree.items(()),
+            blocks: self.tree.items(()),
+            tag_registry: if exported_tags.is_empty() {
+                None
+            } else {
+                Some(TagRegistrySnapshot::Hierarchical(exported_tags))
+            },
         };
 
         let data = serde_json::to_vec_pretty(&snapshot)?;
@@ -417,10 +831,22 @@ impl Timeline {
         match fs::read_to_string(path) {
             Ok(contents) => {
                 let snapshot: TimelineSnapshot = serde_json::from_str(&contents)?;
-                let tree = SumTree::from_iter(snapshot.entries, ());
+                let tree = SumTree::from_iter(snapshot.blocks, ());
+                let tag_registry = match snapshot.tag_registry {
+                    Some(TagRegistrySnapshot::Hierarchical(tags)) => TagRegistry::from_tags(tags),
+                    Some(TagRegistrySnapshot::Flat(map)) => {
+                        let parsed: HashMap<u32, String> = map
+                            .into_iter()
+                            .filter_map(|(id, tag)| id.parse::<u32>().ok().map(|id| (id, tag)))
+                            .collect();
+                        TagRegistry::from_map(parsed)
+                    }
+                    None => TagRegistry::new(),
+                };
                 Ok(Self {
                     tree,
                     version: snapshot.version,
+                    tag_registry,
                 })
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
@@ -473,6 +899,107 @@ mod tests {
     }
 
     #[test]
+    fn tag_registry_assigns_unique_ids() {
+        let mut registry = TagRegistry::new();
+        let alpha = registry.intern_segment(None, "alpha");
+        let beta = registry.intern_segment(None, "beta");
+
+        assert_ne!(alpha, beta);
+        assert_eq!(
+            registry.get_tag(alpha).map(|tag| tag.name.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            registry.get_tag(beta).map(|tag| tag.name.as_str()),
+            Some("beta")
+        );
+    }
+
+    #[test]
+    fn tag_registry_reuses_existing_id_for_same_tag() {
+        let mut registry = TagRegistry::new();
+        let first = registry
+            .intern_path(["project", "sightline"])
+            .expect("path id");
+        let second = registry
+            .intern_path(["project", "sightline"])
+            .expect("path id");
+
+        assert_eq!(first, second);
+        let tag = registry.get_tag(first).expect("tag exists");
+        assert_eq!(tag.name, "sightline");
+        let parent = tag.parent_id.and_then(|id| registry.get_tag(id));
+        assert_eq!(parent.map(|tag| tag.name.as_str()), Some("project"));
+    }
+
+    #[test]
+    fn tag_registry_full_name_reconstructs_hierarchy() {
+        let mut registry = TagRegistry::new();
+        let id = registry
+            .intern_path(["project", "sightline", "importer"])
+            .expect("path id");
+
+        assert_eq!(
+            registry.full_name(id).as_deref(),
+            Some("project:sightline:importer")
+        );
+
+        let child = registry.get_tag(id).unwrap();
+        let parent = registry.get_tag(child.parent_id.unwrap()).unwrap();
+        assert_eq!(parent.name, "sightline");
+        let grandparent = registry.get_tag(parent.parent_id.unwrap()).unwrap();
+        assert_eq!(grandparent.name, "project");
+    }
+
+    #[test]
+    fn tag_registry_intern_colon_path_trims_segments() {
+        let mut registry = TagRegistry::new();
+        let id = registry
+            .intern_colon_path(" project : sightline : importer ")
+            .expect("path id");
+
+        assert_eq!(
+            registry.full_name(id).as_deref(),
+            Some("project:sightline:importer")
+        );
+    }
+
+    #[test]
+    fn filter_cursor_prunes_blocks_without_matching_tag() {
+        let tag_id = 42;
+        let date = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+        let blocks = vec![
+            TaggedBlock {
+                date,
+                text: "First".to_string(),
+                tags: Vec::new(),
+            },
+            TaggedBlock {
+                date,
+                text: "Tagged".to_string(),
+                tags: vec![tag_id],
+            },
+            TaggedBlock {
+                date,
+                text: "Third".to_string(),
+                tags: Vec::new(),
+            },
+        ];
+
+        let tree = SumTree::from_iter(blocks, ());
+        let mut cursor = tree.filter::<_, ()>((), |summary: &TimelineSummary| {
+            summary.tags_filter.check(&tag_id)
+        });
+
+        cursor.next();
+        let item = cursor.item().expect("cursor should point at tagged block");
+        assert_eq!(item.text, "Tagged");
+
+        cursor.next();
+        assert!(cursor.item().is_none());
+    }
+
+    #[test]
     fn chars_dimension_accumulates_character_counts() {
         let mut dimension = Chars::zero(());
 
@@ -494,9 +1021,10 @@ mod tests {
     #[test]
     fn editable_timeline_insert_inserts_text_at_position() {
         let base_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let entries = vec![LogEntry {
+        let entries = vec![TaggedBlock {
             date: base_date,
             text: "abcd".to_string(),
+            tags: Vec::new(),
         }];
 
         let mut tree = SumTree::from_iter(entries, ());
@@ -516,9 +1044,10 @@ mod tests {
     #[test]
     fn editable_timeline_delete_within_entry_removes_characters() {
         let base_date = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
-        let entries = vec![LogEntry {
+        let entries = vec![TaggedBlock {
             date: base_date,
             text: "abcdef".to_string(),
+            tags: Vec::new(),
         }];
 
         let mut tree = SumTree::from_iter(entries, ());
@@ -541,13 +1070,15 @@ mod tests {
         let date_b = NaiveDate::from_ymd_opt(2024, 3, 2).unwrap();
 
         let entries = vec![
-            LogEntry {
+            TaggedBlock {
                 date: date_a,
                 text: "12345".to_string(),
+                tags: Vec::new(),
             },
-            LogEntry {
+            TaggedBlock {
                 date: date_b,
                 text: "ABCDE".to_string(),
+                tags: Vec::new(),
             },
         ];
 
@@ -570,13 +1101,16 @@ mod tests {
         let date_a = NaiveDate::from_ymd_opt(2024, 5, 1).unwrap();
         let date_b = NaiveDate::from_ymd_opt(2024, 5, 3).unwrap();
 
-        let entry_a = LogEntry {
+        let tag_id = 7;
+        let entry_a = TaggedBlock {
             date: date_a,
             text: "Hello".to_string(),
+            tags: vec![tag_id],
         };
-        let entry_b = LogEntry {
+        let entry_b = TaggedBlock {
             date: date_b,
             text: "世界".to_string(),
+            tags: Vec::new(),
         };
 
         let mut summary = entry_a.summary(());
@@ -588,6 +1122,7 @@ mod tests {
         assert_eq!(summary.total_bytes, 5 + "世界".len());
         assert_eq!(summary.min_date, Some(date_a));
         assert_eq!(summary.max_date, Some(date_b));
+        assert!(summary.tags_filter.check(&tag_id));
     }
 
     #[test]
@@ -726,8 +1261,43 @@ mod tests {
         let snapshot: TimelineSnapshot = from_str(&contents).expect("parse snapshot");
 
         assert_eq!(snapshot.version, timeline.version());
-        assert_eq!(snapshot.entries.len(), 1);
-        assert_eq!(snapshot.entries[0].text, "Snapshot test");
+        assert_eq!(snapshot.blocks.len(), 1);
+        assert_eq!(snapshot.blocks[0].text, "Snapshot test");
+        assert!(snapshot.tag_registry.is_none());
+    }
+
+    #[test]
+    fn save_to_path_includes_tag_hierarchy() {
+        let mut timeline = Timeline::default();
+        let project_id = timeline.tag_registry_mut().intern_segment(None, "project");
+        let _child_id = timeline
+            .tag_registry_mut()
+            .intern_segment(Some(project_id), "sightline");
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("timeline.json");
+        timeline.save_to_path(&path).expect("save timeline");
+
+        let contents = std::fs::read_to_string(&path).expect("read snapshot");
+        let snapshot: TimelineSnapshot = from_str(&contents).expect("parse snapshot");
+
+        let tags = match snapshot.tag_registry {
+            Some(TagRegistrySnapshot::Hierarchical(tags)) => tags,
+            other => panic!("unexpected tag registry format: {:?}", other),
+        };
+
+        assert_eq!(tags.len(), 2);
+        let project = tags
+            .iter()
+            .find(|tag| tag.name == "project")
+            .expect("project tag present");
+        assert!(project.parent_id.is_none());
+
+        let sightline = tags
+            .iter()
+            .find(|tag| tag.name == "sightline")
+            .expect("sightline tag present");
+        assert_eq!(sightline.parent_id, Some(project.id));
     }
 
     #[test]
@@ -757,6 +1327,122 @@ mod tests {
 
         assert_eq!(loaded.version(), 0);
         assert_eq!(loaded.entry_count(), 0);
+    }
+
+    #[test]
+    fn load_legacy_flat_tag_registry() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("timeline.json");
+        let legacy_snapshot = serde_json::json!({
+            "version": 1,
+            "blocks": [],
+            "tag_registry": {
+                "5": "project:sightline"
+            }
+        });
+        std::fs::write(&path, legacy_snapshot.to_string()).expect("write legacy snapshot");
+
+        let loaded = Timeline::load_from_path(&path).expect("load timeline");
+        assert_eq!(loaded.version(), 1);
+        assert_eq!(loaded.entry_count(), 0);
+        assert_eq!(
+            loaded.tag_registry().full_name(5).as_deref(),
+            Some("project:sightline")
+        );
+    }
+
+    #[test]
+    fn search_prefix_returns_matching_blocks() {
+        let date = NaiveDate::from_ymd_opt(2024, 8, 1).unwrap();
+        let mut registry = TagRegistry::new();
+        let project = registry.intern_segment(None, "project");
+        let sightline = registry.intern_segment(Some(project), "sightline");
+        let home = registry.intern_segment(Some(project), "home");
+        let journal = registry
+            .intern_path(["type", "journal"])
+            .expect("journal tag");
+
+        let blocks = vec![
+            TaggedBlock {
+                date,
+                text: "Sightline plan".to_string(),
+                tags: vec![sightline],
+            },
+            TaggedBlock {
+                date,
+                text: "Home renovation".to_string(),
+                tags: vec![home],
+            },
+            TaggedBlock {
+                date,
+                text: "Daily reflection".to_string(),
+                tags: vec![journal],
+            },
+        ];
+
+        let timeline = Timeline {
+            tree: SumTree::from_iter(blocks, ()),
+            version: 0,
+            tag_registry: registry,
+        };
+
+        assert_eq!(timeline.search_prefix("#project"), vec![0, 1]);
+    }
+
+    #[test]
+    fn search_infix_finds_partial_matches() {
+        let date = NaiveDate::from_ymd_opt(2024, 9, 2).unwrap();
+        let mut registry = TagRegistry::new();
+        let project = registry.intern_segment(None, "project");
+        let sightline = registry.intern_segment(Some(project), "sightline");
+        let research = registry.intern_segment(Some(project), "research");
+
+        let blocks = vec![
+            TaggedBlock {
+                date,
+                text: "Sightline planning".to_string(),
+                tags: vec![sightline],
+            },
+            TaggedBlock {
+                date,
+                text: "Research notes".to_string(),
+                tags: vec![research],
+            },
+        ];
+
+        let timeline = Timeline {
+            tree: SumTree::from_iter(blocks, ()),
+            version: 0,
+            tag_registry: registry,
+        };
+
+        assert_eq!(timeline.search_infix("sight"), vec![0]);
+        assert_eq!(timeline.search_infix("search"), vec![1]);
+    }
+
+    #[test]
+    fn autocomplete_tags_returns_canonical_strings() {
+        let mut registry = TagRegistry::new();
+        let project = registry.intern_segment(None, "project");
+        let _sightline = registry.intern_segment(Some(project), "sightline");
+        let _strategy = registry.intern_segment(Some(project), "strategy");
+        let _journal = registry
+            .intern_path(["type", "journal"])
+            .expect("journal tag");
+
+        let timeline = Timeline {
+            tree: SumTree::new(()),
+            version: 0,
+            tag_registry: registry,
+        };
+
+        let results = timeline.autocomplete_tags("#pro");
+        assert!(results.contains(&"#project".to_string()));
+        assert!(results.contains(&"#project:sightline".to_string()));
+        assert!(results.contains(&"#project:strategy".to_string()));
+
+        let type_results = timeline.autocomplete_tags("#type:j");
+        assert_eq!(type_results, vec!["#type:journal".to_string()]);
     }
 
     #[test]

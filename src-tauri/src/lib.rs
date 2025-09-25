@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 pub mod api;
+pub mod chat;
 pub mod timeline;
 
 pub struct AppState {
@@ -91,19 +92,44 @@ pub mod commands {
         let timeline = state.get_timeline();
         Ok(timeline.log_for_date(parsed).unwrap_or_default())
     }
+
+    #[tauri::command]
+    pub fn search_prefix(state: State<AppState>, query: String) -> Result<Vec<u32>, String> {
+        let timeline = state.get_timeline();
+        Ok(timeline.search_prefix(&query))
+    }
+
+    #[tauri::command]
+    pub fn search_infix(state: State<AppState>, query: String) -> Result<Vec<u32>, String> {
+        let timeline = state.get_timeline();
+        Ok(timeline.search_infix(&query))
+    }
+
+    #[tauri::command]
+    pub fn autocomplete_tag(state: State<AppState>, query: String) -> Result<Vec<String>, String> {
+        let timeline = state.get_timeline();
+        Ok(timeline.autocomplete_tags(&query))
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            chat::register(app.handle().clone());
+            Ok(())
+        })
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::entry_count,
             commands::handle_edit,
             commands::get_full_document,
             commands::get_document_snapshot,
-            commands::get_log_for_date
+            commands::get_log_for_date,
+            commands::search_prefix,
+            commands::search_infix,
+            commands::autocomplete_tag
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

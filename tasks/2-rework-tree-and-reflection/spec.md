@@ -2,15 +2,26 @@
 
 This plan outlines the work to refactor the core data model to a flexible tagging system and implement the primary user-facing feature: the "Collaborative Session" for daily logs.
 
+## Engineering Q&A Clarifications
+
+* **TaggedBlock structure**: Each block keeps `date: NaiveDate`, `text: String`, and `tags: Vec<u32>`. Dates stay first-class metadata.
+* **TimelineSummary dates**: Continue tracking `min_date`/`max_date`; Bloom filters augment tag lookups only.
+* **Snapshot format**: Persist as `{ version, blocks: [TaggedBlock], tag_registry: [Tag] }` where `Tag { id, name, parent_id }`; continue accepting the legacy `{ id -> "path" }` map when loading.
+* **Importer CLI**: Workspace now owns a standalone `importer` binary crate that reuses the shared registry helpers; `--source` and `--output` are required, the tool walks `/journal` and `/projects`, applies `#type:journal` / `#type:project-note` tags, builds hierarchical `project:*` tags from directory paths, and emits the new `{ blocks, tag_registry }` snapshot format.
+* **Today editor**: Reuse existing `TimelineEditor`; parent fetches today’s content via `get_log_for_date`.
+* **Chat events**: Use `chat-message`/`chat-response` names; backend echo listener satisfies PoC.
+* **Initial prompt copy**: Return a short, user-facing string (e.g., friendly greeting) rather than LLM payload.
+* **Frontend chat test seam**: The `ChatPane` component should accept injectable `emit`/`listen` handlers so tests can stub the Tauri event bridge without real IPC.
+
 ### Milestone 1: Data Model Refactor (Rust Backend)
 
 **Ticket 1: Implement Tag Interning Registry**
 * **Goal:** Create a system for managing a central registry of tags to ensure memory efficiency and enable global tag edits.
-* **Details:** The `Timeline` struct will own a `HashMap<u32, String>` for the tag registry and a `HashMap<String, u32>` for fast lookups. A mechanism for adding new tags and getting or creating an ID for a tag string is required.
+* **Details:** The `Timeline` struct will own a normalized `TagRegistry` that stores `Tag { id, name, parent_id }` entries, plus lookups for `(parent_id, name) -> id`. Helpers should exist for interning colon-delimited paths and reconstructing display names from stored segments.
 * **Acceptance Criteria:**
-    * A `TagRegistry` struct is created with methods `get_id(&mut self, tag: &str) -> u32` and `get_tag(&self, id: u32) -> Option<&String>`.
-    * A unit test proves that calling `get_id` with a new tag string returns a new, unique ID and adds the tag to the registry.
-    * A unit test proves that calling `get_id` with an existing tag string returns its previously assigned ID.
+    * A `TagRegistry` struct exposes `intern_segment`, `intern_path`, and `full_name` APIs, along with `intern_colon_path` for convenience.
+    * Unit tests prove that inserting a new segment creates a unique ID, reusing the ID for repeated paths and preserving parent/child links.
+    * Unit tests prove that `full_name` yields colon-delimited display strings in the correct hierarchy order.
 
 ---
 **Ticket 2: Refactor `LogEntry` to `TaggedBlock`**
@@ -46,6 +57,7 @@ This plan outlines the work to refactor the core data model to a flexible taggin
 * **Acceptance Criteria:**
     * The `ChatPane` component contains a text input, a "Send" button, and a message history area.
     * A headless function `get_initial_prompt(is_daily_log_empty: bool)` is created and unit tested.
+    * The chat pane exposes a thin seam for dependency injection so tests can provide mock `emit` / `listen` functions without using the real Tauri runtime.
     * The component test using **Vitest** verifies that when a user sends a message, the frontend **emits a Tauri event** (e.g., `event-name: 'chat-message'`, `payload: { text: '...' }`).
     * A **Rust event listener** is created in the backend that listens for the `'chat-message'` event.
     * A headless test for the Rust listener verifies that upon receiving a message, it **emits a new event back** to the frontend (e.g., `event-name: 'chat-response'`, `payload: { text: 'ECHO: ...' }`).

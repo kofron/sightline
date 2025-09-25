@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["src-tauri", "sum-tree", "xtask"]
+members = [ "importer","src-tauri", "sum-tree", "xtask"]
 
 [workspace.dependencies]
 arrayvec = "0.7.6"
