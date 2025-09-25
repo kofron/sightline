@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 pub mod api;
-mod timeline;
+pub mod timeline;
 
 pub struct AppState {
     timeline: Mutex<timeline::Timeline>,
@@ -28,7 +28,7 @@ impl Default for AppState {
 
 pub mod commands {
     use super::*;
-    use chrono::{NaiveDate, Utc};
+    use chrono::NaiveDate;
     use serde::Serialize;
     use tauri::State;
 
@@ -44,32 +44,9 @@ pub mod commands {
         payload: api::EditPayload,
     ) -> Result<api::EditResponse, String> {
         let mut timeline = state.get_timeline();
+        let api::EditPayload { base_version, ops } = payload;
 
-        let mut timeline_ops = Vec::with_capacity(payload.ops.len());
-        for op in payload.ops.iter() {
-            match op {
-                api::TextOperation::Insert { position, text } => {
-                    timeline_ops.push(timeline::TimelineOp::Insert(
-                        timeline::TimelineInsert {
-                            position: *position,
-                            date: Utc::now().date_naive(),
-                            text: text.clone(),
-                        },
-                    ))
-                }
-                api::TextOperation::Delete {
-                    start_position,
-                    end_position,
-                } => timeline_ops.push(timeline::TimelineOp::Delete(
-                    timeline::TimelineDelete {
-                        start: *start_position,
-                        end: *end_position,
-                    },
-                )),
-            }
-        }
-
-        match timeline.apply_ops(payload.base_version, &timeline_ops) {
+        match timeline.apply_ops(base_version, &ops) {
             Ok(new_version) => {
                 if let Err(err) = timeline.save() {
                     tracing::warn!(?err, "failed to save timeline after edit");
@@ -112,7 +89,7 @@ pub mod commands {
             .map_err(|err| format!("invalid date format: {err}"))?;
 
         let timeline = state.get_timeline();
-        Ok(timeline.log_for_date(parsed).unwrap_or_else(String::new))
+        Ok(timeline.log_for_date(parsed).unwrap_or_default())
     }
 }
 

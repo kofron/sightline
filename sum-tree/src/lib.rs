@@ -1,3 +1,5 @@
+#![allow(clippy::needless_lifetimes)]
+
 mod cursor;
 mod tree_map;
 
@@ -1032,7 +1034,7 @@ mod tests {
                     tree.cursor::<()>(()).collect::<Vec<_>>()
                 );
 
-                tracing::info!("tree items: {:?}", tree.items(()));
+                tracing::debug!("tree items: {:?}", tree.items(()));
 
                 let mut filter_cursor =
                     tree.filter::<_, Count>((), |summary| summary.contains_even);
@@ -1051,17 +1053,17 @@ mod tests {
                     expected_filtered_items.len().saturating_sub(1)
                 };
                 while item_ix < expected_filtered_items.len() {
-                    tracing::info!("filter_cursor, item_ix: {}", item_ix);
+                    tracing::debug!("filter_cursor, item_ix: {}", item_ix);
                     let actual_item = filter_cursor.item().unwrap();
                     let (reference_index, reference_item) = expected_filtered_items[item_ix];
                     assert_eq!(actual_item, &reference_item);
                     assert_eq!(filter_cursor.start().0, reference_index);
-                    tracing::info!("next");
+                    tracing::debug!("next");
                     filter_cursor.next();
                     item_ix += 1;
 
                     while item_ix > 0 && rng.random_bool(0.2) {
-                        tracing::info!("prev");
+                        tracing::debug!("prev");
                         filter_cursor.prev();
                         item_ix -= 1;
 

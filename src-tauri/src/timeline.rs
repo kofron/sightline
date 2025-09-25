@@ -3,10 +3,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::{cmp, env};
 
+use crate::api::TextOperation;
 use chrono::NaiveDate;
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
-use sum_tree::{Item, SumTree, Summary};
+use sum_tree::{Bias, Dimension, Item, SumTree, Summary};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -71,23 +72,221 @@ impl Item for LogEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimelineInsert {
-    pub position: usize,
-    pub date: NaiveDate,
-    pub text: String,
+pub trait EditableTimeline {
+    fn apply_ops(
+        &mut self,
+        ops: &[TextOperation],
+        date_for_inserts: NaiveDate,
+    ) -> Result<(), ApplyOpsError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimelineDelete {
-    pub start: usize,
-    pub end: usize,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Chars(pub usize);
+
+impl<'a> Dimension<'a, TimelineSummary> for Chars {
+    fn zero(_: ()) -> Self {
+        Self(0)
+    }
+
+    fn add_summary(&mut self, summary: &'a TimelineSummary, _: ()) {
+        self.0 += summary.total_chars;
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TimelineOp {
-    Insert(TimelineInsert),
-    Delete(TimelineDelete),
+impl EditableTimeline for SumTree<LogEntry> {
+    fn apply_ops(
+        &mut self,
+        ops: &[TextOperation],
+        date_for_inserts: NaiveDate,
+    ) -> Result<(), ApplyOpsError> {
+        for op in ops {
+            match op {
+                TextOperation::Insert { position, text } => {
+                    apply_insert(self, *position, text, date_for_inserts)?;
+                }
+                TextOperation::Delete {
+                    start_position,
+                    end_position,
+                } => {
+                    apply_delete(self, *start_position, *end_position)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn apply_insert(
+    tree: &mut SumTree<LogEntry>,
+    position: usize,
+    text: &str,
+    date: NaiveDate,
+) -> Result<(), ApplyOpsError> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let total_chars = tree.summary().total_chars;
+    if position > total_chars {
+        return Err(ApplyOpsError::InvalidPosition { position });
+    }
+
+    let mut cursor = tree.cursor::<Chars>(());
+    let mut left_tree = cursor.slice(&Chars(position), Bias::Left);
+    let consumed = cursor.start().0;
+    let offset_in_item = position - consumed;
+
+    if offset_in_item > 0 {
+        let current = cursor
+            .item()
+            .ok_or(ApplyOpsError::InvalidPosition { position })?;
+        let char_count = current.char_count();
+        if offset_in_item > char_count {
+            return Err(ApplyOpsError::InvalidPosition { position });
+        }
+
+        let (left_fragment, right_fragment) = split_at_char(&current.text, offset_in_item)
+            .ok_or(ApplyOpsError::InvalidPosition { position })?;
+
+        if !left_fragment.is_empty() {
+            left_tree.push(
+                LogEntry {
+                    date: current.date,
+                    text: left_fragment,
+                },
+                (),
+            );
+        }
+
+        left_tree.push(
+            LogEntry {
+                date,
+                text: text.to_string(),
+            },
+            (),
+        );
+
+        let mut right_tree = SumTree::new(());
+        if !right_fragment.is_empty() {
+            right_tree.push(
+                LogEntry {
+                    date: current.date,
+                    text: right_fragment,
+                },
+                (),
+            );
+        }
+
+        cursor.next();
+        right_tree.append(cursor.suffix(), ());
+        left_tree.append(right_tree, ());
+    } else {
+        left_tree.push(
+            LogEntry {
+                date,
+                text: text.to_string(),
+            },
+            (),
+        );
+        left_tree.append(cursor.suffix(), ());
+    }
+
+    drop(cursor);
+    *tree = left_tree;
+
+    Ok(())
+}
+
+fn apply_delete(
+    tree: &mut SumTree<LogEntry>,
+    start: usize,
+    end: usize,
+) -> Result<(), ApplyOpsError> {
+    if start == end {
+        return Ok(());
+    }
+
+    if start > end {
+        return Err(ApplyOpsError::InvalidRange { start, end });
+    }
+
+    let total_chars = tree.summary().total_chars;
+    if start > total_chars || end > total_chars {
+        return Err(ApplyOpsError::InvalidRange { start, end });
+    }
+
+    let mut prefix_cursor = tree.cursor::<Chars>(());
+    let mut left_tree = prefix_cursor.slice(&Chars(start), Bias::Left);
+    let consumed = prefix_cursor.start().0;
+    let offset_in_item = start - consumed;
+
+    if offset_in_item > 0 {
+        let current = prefix_cursor
+            .item()
+            .ok_or(ApplyOpsError::InvalidRange { start, end })?;
+        let char_count = current.char_count();
+        if offset_in_item > char_count {
+            return Err(ApplyOpsError::InvalidRange { start, end });
+        }
+
+        let (left_fragment, _right_fragment) = split_at_char(&current.text, offset_in_item)
+            .ok_or(ApplyOpsError::InvalidRange { start, end })?;
+
+        if !left_fragment.is_empty() {
+            left_tree.push(
+                LogEntry {
+                    date: current.date,
+                    text: left_fragment,
+                },
+                (),
+            );
+        }
+
+        prefix_cursor.next();
+    }
+
+    let mut suffix_cursor = tree.cursor::<Chars>(());
+    let _ = suffix_cursor.slice(&Chars(end), Bias::Left);
+    let consumed_end = suffix_cursor.start().0;
+    if consumed_end > end {
+        return Err(ApplyOpsError::InvalidRange { start, end });
+    }
+    let tail_offset = end - consumed_end;
+
+    let mut right_tree = SumTree::new(());
+    if let Some(item) = suffix_cursor.item() {
+        let char_count = item.char_count();
+        if tail_offset > char_count {
+            return Err(ApplyOpsError::InvalidRange { start, end });
+        }
+
+        let (_, tail) = split_at_char(&item.text, tail_offset)
+            .ok_or(ApplyOpsError::InvalidRange { start, end })?;
+
+        if !tail.is_empty() {
+            right_tree.push(
+                LogEntry {
+                    date: item.date,
+                    text: tail,
+                },
+                (),
+            );
+        }
+
+        suffix_cursor.next();
+    } else if tail_offset != 0 {
+        return Err(ApplyOpsError::InvalidRange { start, end });
+    }
+
+    right_tree.append(suffix_cursor.suffix(), ());
+    left_tree.append(right_tree, ());
+
+    drop(prefix_cursor);
+    drop(suffix_cursor);
+    *tree = left_tree;
+
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -168,7 +367,7 @@ impl Timeline {
     pub fn apply_ops(
         &mut self,
         base_version: u64,
-        ops: &[TimelineOp],
+        ops: &[TextOperation],
     ) -> Result<u64, ApplyOpsError> {
         if base_version != self.version {
             return Err(ApplyOpsError::VersionMismatch {
@@ -181,24 +380,8 @@ impl Timeline {
             return Ok(self.version);
         }
 
-        let mut entries = self.tree.items(());
-
-        for op in ops {
-            match op {
-                TimelineOp::Insert(TimelineInsert {
-                    position,
-                    date,
-                    text,
-                }) => {
-                    insert_text(&mut entries, *position, date, text.clone())?;
-                }
-                TimelineOp::Delete(TimelineDelete { start, end }) => {
-                    delete_range(&mut entries, *start, *end)?;
-                }
-            }
-        }
-
-        self.tree = SumTree::from_iter(entries, ());
+        let today = chrono::Utc::now().date_naive();
+        self.tree.apply_ops(ops, today)?;
         self.version += 1;
         Ok(self.version)
     }
@@ -254,54 +437,6 @@ pub fn get_storage_path() -> Result<PathBuf, TimelinePersistenceError> {
     Ok(base.join("sightline").join("timeline.json"))
 }
 
-fn insert_text(
-    entries: &mut Vec<LogEntry>,
-    position: usize,
-    date: &NaiveDate,
-    text: String,
-) -> Result<(), ApplyOpsError> {
-    let mut cursor = 0usize;
-    let mut index = 0usize;
-
-    while index < entries.len() {
-        let entry_chars = entries[index].char_count();
-        if position <= cursor + entry_chars {
-            let offset = position - cursor;
-            if offset == 0 {
-                entries.insert(index, LogEntry { date: *date, text });
-                return Ok(());
-            } else if offset == entry_chars {
-                entries.insert(index + 1, LogEntry { date: *date, text });
-                return Ok(());
-            } else {
-                let existing_date = entries[index].date;
-                let (left, right) = split_at_char(&entries[index].text, offset)
-                    .ok_or(ApplyOpsError::InvalidPosition { position })?;
-                entries[index].text = left;
-                entries.insert(index + 1, LogEntry { date: *date, text });
-                entries.insert(
-                    index + 2,
-                    LogEntry {
-                        date: existing_date,
-                        text: right,
-                    },
-                );
-                return Ok(());
-            }
-        }
-
-        cursor += entry_chars;
-        index += 1;
-    }
-
-    if position == cursor {
-        entries.push(LogEntry { date: *date, text });
-        Ok(())
-    } else {
-        Err(ApplyOpsError::InvalidPosition { position })
-    }
-}
-
 fn split_at_char(input: &str, char_index: usize) -> Option<(String, String)> {
     if char_index == 0 {
         return Some((String::new(), input.to_string()));
@@ -323,71 +458,6 @@ fn split_at_char(input: &str, char_index: usize) -> Option<(String, String)> {
     }
 }
 
-fn delete_range(
-    entries: &mut Vec<LogEntry>,
-    start: usize,
-    end: usize,
-) -> Result<(), ApplyOpsError> {
-    if start == end {
-        return Ok(());
-    }
-
-    if start > end {
-        return Err(ApplyOpsError::InvalidRange { start, end });
-    }
-
-    let total_chars: usize = entries.iter().map(LogEntry::char_count).sum();
-    if end > total_chars {
-        return Err(ApplyOpsError::InvalidRange { start, end });
-    }
-
-    let mut new_entries = Vec::with_capacity(entries.len());
-    let mut cursor = 0usize;
-
-    for entry in entries.iter() {
-        let entry_chars = entry.char_count();
-        let entry_start = cursor;
-        let entry_end = cursor + entry_chars;
-
-        if entry_end <= start || entry_start >= end {
-            new_entries.push(entry.clone());
-        } else {
-            let overlap_start = start.max(entry_start);
-            let overlap_end = end.min(entry_end);
-
-            if entry_start < overlap_start {
-                let prefix_len = overlap_start - entry_start;
-                let (prefix, _) = split_at_char(&entry.text, prefix_len)
-                    .ok_or(ApplyOpsError::InvalidRange { start, end })?;
-                if !prefix.is_empty() {
-                    new_entries.push(LogEntry {
-                        date: entry.date,
-                        text: prefix,
-                    });
-                }
-            }
-
-            if overlap_end < entry_end {
-                let suffix_len = entry_end - overlap_end;
-                let split_index = entry_chars - suffix_len;
-                let (_, suffix) = split_at_char(&entry.text, split_index)
-                    .ok_or(ApplyOpsError::InvalidRange { start, end })?;
-                if !suffix.is_empty() {
-                    new_entries.push(LogEntry {
-                        date: entry.date,
-                        text: suffix,
-                    });
-                }
-            }
-        }
-
-        cursor = entry_end;
-    }
-
-    *entries = new_entries;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,12 +465,104 @@ mod tests {
     use std::env;
     use tempfile::tempdir;
 
-    fn sample_insert(text: &str) -> TimelineOp {
-        TimelineOp::Insert(TimelineInsert {
+    fn sample_insert(text: &str) -> TextOperation {
+        TextOperation::Insert {
             position: 0,
-            date: NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
             text: text.to_string(),
-        })
+        }
+    }
+
+    #[test]
+    fn chars_dimension_accumulates_character_counts() {
+        let mut dimension = Chars::zero(());
+
+        let summary_a = TimelineSummary {
+            total_chars: 3,
+            ..TimelineSummary::default()
+        };
+        dimension.add_summary(&summary_a, ());
+
+        let summary_b = TimelineSummary {
+            total_chars: 5,
+            ..TimelineSummary::default()
+        };
+        dimension.add_summary(&summary_b, ());
+
+        assert_eq!(dimension.0, 8);
+    }
+
+    #[test]
+    fn editable_timeline_insert_inserts_text_at_position() {
+        let base_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let entries = vec![LogEntry {
+            date: base_date,
+            text: "abcd".to_string(),
+        }];
+
+        let mut tree = SumTree::from_iter(entries, ());
+        tree.apply_ops(
+            &[TextOperation::Insert {
+                position: 2,
+                text: "XY".to_string(),
+            }],
+            base_date,
+        )
+        .expect("insert");
+
+        let content: String = tree.iter().map(|entry| entry.text.as_str()).collect();
+        assert_eq!(content, "abXYcd");
+    }
+
+    #[test]
+    fn editable_timeline_delete_within_entry_removes_characters() {
+        let base_date = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
+        let entries = vec![LogEntry {
+            date: base_date,
+            text: "abcdef".to_string(),
+        }];
+
+        let mut tree = SumTree::from_iter(entries, ());
+        tree.apply_ops(
+            &[TextOperation::Delete {
+                start_position: 2,
+                end_position: 4,
+            }],
+            base_date,
+        )
+        .expect("delete");
+
+        let content: String = tree.iter().map(|entry| entry.text.as_str()).collect();
+        assert_eq!(content, "abef");
+    }
+
+    #[test]
+    fn editable_timeline_delete_spanning_entries_trims_correctly() {
+        let date_a = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        let date_b = NaiveDate::from_ymd_opt(2024, 3, 2).unwrap();
+
+        let entries = vec![
+            LogEntry {
+                date: date_a,
+                text: "12345".to_string(),
+            },
+            LogEntry {
+                date: date_b,
+                text: "ABCDE".to_string(),
+            },
+        ];
+
+        let mut tree = SumTree::from_iter(entries, ());
+        tree.apply_ops(
+            &[TextOperation::Delete {
+                start_position: 3,
+                end_position: 7,
+            }],
+            date_a,
+        )
+        .expect("delete across entries");
+
+        let content: String = tree.iter().map(|entry| entry.text.as_str()).collect();
+        assert_eq!(content, "123CDE");
     }
 
     #[test]
@@ -419,7 +581,7 @@ mod tests {
 
         let mut summary = entry_a.summary(());
         let other_summary = entry_b.summary(());
-        summary.add_summary(&other_summary, ());
+        sum_tree::Summary::add_summary(&mut summary, &other_summary, ());
 
         assert_eq!(summary.entry_count, 2);
         assert_eq!(summary.total_chars, 7);
@@ -431,16 +593,14 @@ mod tests {
     #[test]
     fn apply_insert_updates_content_and_version() {
         let mut timeline = Timeline::default();
-        let date = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
 
         let new_version = timeline
             .apply_ops(
                 0,
-                &[TimelineOp::Insert(TimelineInsert {
+                &[TextOperation::Insert {
                     position: 0,
-                    date,
                     text: "Happy New Year!".to_string(),
-                })],
+                }],
             )
             .expect("insert succeeds");
 
@@ -448,30 +608,31 @@ mod tests {
         assert_eq!(timeline.version(), 1);
         assert_eq!(timeline.content(), "Happy New Year!");
         assert_eq!(timeline.entry_count(), 1);
-        assert_eq!(timeline.summary().min_date, Some(date));
-        assert_eq!(timeline.summary().max_date, Some(date));
+        assert_eq!(timeline.summary().min_date, timeline.summary().max_date);
+        assert!(timeline.summary().min_date.is_some());
     }
 
     #[test]
     fn apply_delete_removes_text() {
         let mut timeline = Timeline::default();
-        let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
 
         timeline
             .apply_ops(
                 0,
-                &[TimelineOp::Insert(TimelineInsert {
+                &[TextOperation::Insert {
                     position: 0,
-                    date,
                     text: "abcdef".to_string(),
-                })],
+                }],
             )
             .expect("initial insert succeeds");
 
         let new_version = timeline
             .apply_ops(
                 1,
-                &[TimelineOp::Delete(TimelineDelete { start: 2, end: 4 })],
+                &[TextOperation::Delete {
+                    start_position: 2,
+                    end_position: 4,
+                }],
             )
             .expect("delete succeeds");
 
@@ -484,17 +645,14 @@ mod tests {
     #[test]
     fn apply_delete_spanning_entries_truncates_correctly() {
         let mut timeline = Timeline::default();
-        let date_a = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
-        let date_b = NaiveDate::from_ymd_opt(2024, 2, 2).unwrap();
 
         timeline
             .apply_ops(
                 0,
-                &[TimelineOp::Insert(TimelineInsert {
+                &[TextOperation::Insert {
                     position: 0,
-                    date: date_a,
                     text: "12345".to_string(),
-                })],
+                }],
             )
             .expect("first insert succeeds");
 
@@ -502,18 +660,20 @@ mod tests {
         timeline
             .apply_ops(
                 1,
-                &[TimelineOp::Insert(TimelineInsert {
+                &[TextOperation::Insert {
                     position,
-                    date: date_b,
                     text: "ABCDE".to_string(),
-                })],
+                }],
             )
             .expect("second insert succeeds");
 
         let new_version = timeline
             .apply_ops(
                 2,
-                &[TimelineOp::Delete(TimelineDelete { start: 3, end: 7 })],
+                &[TextOperation::Delete {
+                    start_position: 3,
+                    end_position: 7,
+                }],
             )
             .expect("delete succeeds");
 
@@ -526,22 +686,23 @@ mod tests {
     #[test]
     fn apply_delete_out_of_bounds_returns_error() {
         let mut timeline = Timeline::default();
-        let date = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
 
         timeline
             .apply_ops(
                 0,
-                &[TimelineOp::Insert(TimelineInsert {
+                &[TextOperation::Insert {
                     position: 0,
-                    date,
                     text: "short".to_string(),
-                })],
+                }],
             )
             .expect("insert succeeds");
 
         let result = timeline.apply_ops(
             1,
-            &[TimelineOp::Delete(TimelineDelete { start: 0, end: 10 })],
+            &[TextOperation::Delete {
+                start_position: 0,
+                end_position: 10,
+            }],
         );
 
         assert_eq!(
