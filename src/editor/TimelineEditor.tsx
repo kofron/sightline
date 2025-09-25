@@ -1,21 +1,29 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { MutableRefObject } from "react";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
-import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
 import { ContentEditable } from "@lexical/react/LexicalContentEditable";
+import { RichTextPlugin } from "@lexical/react/LexicalRichTextPlugin";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
+import { MarkdownShortcutPlugin } from "@lexical/react/LexicalMarkdownShortcutPlugin";
+import { ListPlugin } from "@lexical/react/LexicalListPlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import LexicalErrorBoundary from "@lexical/react/LexicalErrorBoundary";
+import { HeadingNode, QuoteNode } from "@lexical/rich-text";
+import { ListItemNode, ListNode } from "@lexical/list";
+import { CodeNode } from "@lexical/code";
+import { LinkNode } from "@lexical/link";
 import {
-  $createParagraphNode,
-  $createTextNode,
-  $getRoot,
-  type LexicalEditor,
-} from "lexical";
+  TRANSFORMERS,
+  $convertFromMarkdownString,
+  $convertToMarkdownString,
+} from "@lexical/markdown";
+import { $createParagraphNode, $getRoot, type LexicalEditor } from "lexical";
 
 import type { TextOperation } from "../api/types";
+import computeOperations from "./operations";
 
 const EDITOR_NAMESPACE = "SightlineTimelineEditor";
+const DEBOUNCELESS_PLACEHOLDER = null;
 
 export interface TimelineEditorProps {
   document_content: string;
@@ -34,13 +42,13 @@ export function TimelineEditor({
   const initialConfig = useMemo(
     () => ({
       namespace: EDITOR_NAMESPACE,
-      nodes: [],
       theme: {},
+      nodes: [HeadingNode, QuoteNode, ListNode, ListItemNode, CodeNode, LinkNode],
       onError(error: unknown) {
         throw error;
       },
       editorState() {
-        writeDocumentContent(initialContentRef.current);
+        setEditorMarkdown(initialContentRef.current);
       },
     }),
     [],
@@ -58,7 +66,7 @@ export function TimelineEditor({
           onChange={on_change}
         />
         <EditorReadyPlugin onReady={register_editor} />
-        <PlainTextPlugin
+        <RichTextPlugin
           contentEditable={
             <ContentEditable
               data-testid="timeline-editor-content"
@@ -66,10 +74,12 @@ export function TimelineEditor({
               aria-label="Timeline editor"
             />
           }
-          placeholder={null}
+          placeholder={DEBOUNCELESS_PLACEHOLDER}
           ErrorBoundary={LexicalErrorBoundary}
         />
         <HistoryPlugin />
+        <ListPlugin />
+        <MarkdownShortcutPlugin transformers={TRANSFORMERS} />
       </LexicalComposer>
     </div>
   );
@@ -91,7 +101,7 @@ function DocumentContentPlugin({
 
     editor.update(
       () => {
-        writeDocumentContent(documentContent);
+        setEditorMarkdown(documentContent);
       },
       { tag: "remote" },
     );
@@ -113,23 +123,26 @@ function ChangeListenerPlugin({
 
   useEffect(() => {
     return editor.registerUpdateListener(({ editorState, tags }) => {
-      const nextText = editorState.read(() => $getRoot().getTextContent());
+      const nextMarkdown = editorState.read(() => {
+        const markdown = $convertToMarkdownString(TRANSFORMERS, undefined, true);
+        return normalizeMarkdown(markdown);
+      });
 
       if (tags.has("remote")) {
-        externalTextRef.current = nextText;
+        externalTextRef.current = nextMarkdown;
         return;
       }
 
       const previousText = externalTextRef.current;
-      if (nextText === previousText) {
+      if (nextMarkdown === previousText) {
         return;
       }
 
-      const operations = computeOperations(previousText, nextText);
-      externalTextRef.current = nextText;
+      const operations = computeOperations(previousText, nextMarkdown);
+      externalTextRef.current = nextMarkdown;
 
       if (operations.length > 0) {
-        onChange?.(operations, nextText);
+        onChange?.(operations, nextMarkdown);
       }
     });
   }, [editor, externalTextRef, onChange]);
@@ -153,67 +166,19 @@ function EditorReadyPlugin({
   return null;
 }
 
-function computeOperations(previousText: string, nextText: string): TextOperation[] {
-  if (previousText === nextText) {
-    return [];
-  }
-
-  const previousChars = Array.from(previousText);
-  const nextChars = Array.from(nextText);
-
-  let prefixLength = 0;
-  while (
-    prefixLength < previousChars.length &&
-    prefixLength < nextChars.length &&
-    previousChars[prefixLength] === nextChars[prefixLength]
-  ) {
-    prefixLength += 1;
-  }
-
-  let suffixLength = 0;
-  while (
-    suffixLength < previousChars.length - prefixLength &&
-    suffixLength < nextChars.length - prefixLength &&
-    previousChars[previousChars.length - 1 - suffixLength] ===
-      nextChars[nextChars.length - 1 - suffixLength]
-  ) {
-    suffixLength += 1;
-  }
-
-  const operations: TextOperation[] = [];
-
-  const deleteCount = previousChars.length - prefixLength - suffixLength;
-  if (deleteCount > 0) {
-    operations.push({
-      type: "delete",
-      start_position: prefixLength,
-      end_position: prefixLength + deleteCount,
-    });
-  }
-
-  const insertCount = nextChars.length - prefixLength - suffixLength;
-  if (insertCount > 0) {
-    const insertedText = nextChars
-      .slice(prefixLength, prefixLength + insertCount)
-      .join("");
-    operations.push({
-      type: "insert",
-      position: prefixLength,
-      text: insertedText,
-    });
-  }
-
-  return operations;
-}
-
-function writeDocumentContent(text: string) {
+function setEditorMarkdown(markdown: string) {
+  const normalized = normalizeMarkdown(markdown);
   const root = $getRoot();
   root.clear();
-  const paragraph = $createParagraphNode();
-  if (text.length > 0) {
-    paragraph.append($createTextNode(text));
+  $convertFromMarkdownString(normalized, TRANSFORMERS, undefined, true);
+
+  if (root.getFirstChild() === null) {
+    root.append($createParagraphNode());
   }
-  root.append(paragraph);
+}
+
+function normalizeMarkdown(markdown: string): string {
+  return markdown.replaceAll('\r\n', '\n');
 }
 
 export default TimelineEditor;

@@ -7,6 +7,7 @@ import type { DocumentSnapshot, TextOperation } from "../api/types";
 import TimelineSyncController, {
   type InvokeFn,
 } from "../sync/TimelineSyncController";
+import computeOperations from "../editor/operations";
 
 interface TimelineWorkspaceProps {
   invokeApi?: InvokeFn;
@@ -16,6 +17,8 @@ interface TimelineWorkspaceProps {
 
 const defaultInvoke: InvokeFn = (command, args) =>
   tauriInvoke(command, args as Record<string, unknown> | undefined);
+
+const EDIT_FLUSH_DELAY_MS = 24;
 
 function formatDateForApi(date: Date): string {
   const year = date.getUTCFullYear();
@@ -36,6 +39,10 @@ export function TimelineWorkspace({
   const [sessionDocument, setSessionDocument] = useState("");
   const [isSessionLoading, setIsSessionLoading] = useState(false);
 
+  const latestDocumentRef = useRef("");
+  const projectedDocumentRef = useRef("");
+  const flushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const Editor = EditorComponent ?? TimelineEditor;
   const ChatPaneView = ChatPaneComponent ?? ChatPane;
 
@@ -51,12 +58,20 @@ export function TimelineWorkspace({
         }
 
         setDocumentContent(snapshot.content);
+        latestDocumentRef.current = snapshot.content;
+        projectedDocumentRef.current = snapshot.content;
 
         controllerRef.current = new TimelineSyncController({
           invoke: invokeFn,
           initialVersion: snapshot.version,
           onConflictResolved: (document, resolvedVersion) => {
             setDocumentContent(document);
+            latestDocumentRef.current = document;
+            projectedDocumentRef.current = document;
+            if (flushTimeoutRef.current) {
+              clearTimeout(flushTimeoutRef.current);
+              flushTimeoutRef.current = null;
+            }
             console.info("timeline resynced to version", resolvedVersion);
           },
           onEditApplied: (newVersion) => {
@@ -75,31 +90,64 @@ export function TimelineWorkspace({
 
     return () => {
       cancelled = true;
+      if (flushTimeoutRef.current) {
+        clearTimeout(flushTimeoutRef.current);
+        flushTimeoutRef.current = null;
+      }
       controllerRef.current = null;
     };
   }, [invokeFn]);
 
+  const flushPendingOperations = useCallback(() => {
+    const controller = controllerRef.current;
+    if (!controller) {
+      return;
+    }
+
+    const sourceContent = projectedDocumentRef.current;
+    const targetContent = latestDocumentRef.current;
+    const operations = computeOperations(sourceContent, targetContent);
+
+    if (operations.length === 0) {
+      return;
+    }
+
+    projectedDocumentRef.current = targetContent;
+
+    controller
+      .handleEditorChange(operations)
+      .then(() => {
+        setIsInitialized(true);
+      })
+      .catch((err) => {
+        projectedDocumentRef.current = sourceContent;
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("failed to apply edit", message);
+      });
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushTimeoutRef.current) {
+      clearTimeout(flushTimeoutRef.current);
+    }
+
+    flushTimeoutRef.current = setTimeout(() => {
+      flushTimeoutRef.current = null;
+      flushPendingOperations();
+    }, EDIT_FLUSH_DELAY_MS);
+  }, [flushPendingOperations]);
+
   const handleEditorChange = useCallback(
-    (operations: TextOperation[], nextText: string) => {
-      const controller = controllerRef.current;
-      if (!controller || operations.length === 0) {
+    (_operations: TextOperation[], nextText: string) => {
+      if (nextText === latestDocumentRef.current) {
         return;
       }
 
       setDocumentContent(nextText);
-      controller
-        .handleEditorChange(operations)
-        .then(() => {
-          if (!isInitialized) {
-            setIsInitialized(true);
-          }
-        })
-        .catch((err) => {
-          const message = err instanceof Error ? err.message : String(err);
-          console.error("failed to apply edit", message);
-        });
+      latestDocumentRef.current = nextText;
+      scheduleFlush();
     },
-    [isInitialized],
+    [scheduleFlush],
   );
 
   const handleSessionEditorChange = useCallback(

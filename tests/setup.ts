@@ -11,6 +11,7 @@ globalThis.window = window as unknown as typeof globalThis.window;
 globalThis.document = window.document;
 globalThis.navigator = window.navigator;
 globalThis.HTMLElement = window.HTMLElement;
+globalThis.Element = window.Element;
 globalThis.Node = window.Node;
 globalThis.getComputedStyle = window.getComputedStyle.bind(window);
 globalThis.requestAnimationFrame = window.requestAnimationFrame.bind(window);

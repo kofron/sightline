@@ -1,10 +1,18 @@
-import { describe, expect, it, beforeEach, afterEach, vi } from "bun:test";
-import { act, fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 import TimelineWorkspace from "../src/components/TimelineWorkspace";
 
 import type { TextOperation } from "../src/api/types";
 import type { TimelineEditorProps } from "../src/editor/TimelineEditor";
+import computeOperations from "../src/editor/operations";
 
 type OnChange = (ops: TextOperation[], nextText: string) => void;
 
@@ -23,14 +31,19 @@ function StubChatPane() {
   return <div data-testid="chat-pane-stub" />;
 }
 
-
-afterEach(() => {
-  cleanup();
-});
+async function flushDebouncedEdits() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+}
 
 beforeEach(() => {
   editorState.onChange = null;
   editorState.content = "";
+});
+
+afterEach(() => {
+  cleanup();
 });
 
 describe("TimelineWorkspace", () => {
@@ -49,7 +62,13 @@ describe("TimelineWorkspace", () => {
       },
     );
 
-    render(<TimelineWorkspace invokeApi={invoke} EditorComponent={StubEditor} ChatPaneComponent={StubChatPane} />);
+    render(
+      <TimelineWorkspace
+        invokeApi={invoke}
+        EditorComponent={StubEditor}
+        ChatPaneComponent={StubChatPane}
+      />,
+    );
 
     await waitFor(() => {
       const editors = screen.getAllByTestId("mock-editor");
@@ -65,20 +84,21 @@ describe("TimelineWorkspace", () => {
       );
     });
 
+    await flushDebouncedEdits();
+
     await waitFor(() => {
-      expect(
-        invoke.mock.calls.some(
-          ([command, args]) =>
-            command === "handle_edit" &&
-            JSON.stringify(args) ===
-              JSON.stringify({
-                payload: {
-                  base_version: 1,
-                  ops: [{ type: "insert", position: 10, text: "!" }],
-                },
-              }),
-        ),
-      ).toBe(true);
+      const call = invoke.mock.calls.find(([command]) => command === "handle_edit");
+      expect(call).toBeDefined();
+      if (!call) {
+        return;
+      }
+      const [, args] = call;
+      expect(args).toEqual({
+        payload: {
+          base_version: 1,
+          ops: computeOperations("Initial doc", "Initial doc!"),
+        },
+      });
     });
 
     await waitFor(() => {
@@ -103,7 +123,13 @@ describe("TimelineWorkspace", () => {
       },
     );
 
-    render(<TimelineWorkspace invokeApi={invoke} EditorComponent={StubEditor} ChatPaneComponent={StubChatPane} />);
+    render(
+      <TimelineWorkspace
+        invokeApi={invoke}
+        EditorComponent={StubEditor}
+        ChatPaneComponent={StubChatPane}
+      />,
+    );
 
     await waitFor(() => {
       const editors = screen.getAllByTestId("mock-editor");
@@ -117,6 +143,8 @@ describe("TimelineWorkspace", () => {
       );
     });
 
+    await flushDebouncedEdits();
+
     await waitFor(() => {
       expect(
         invoke.mock.calls.some(([command]) => command === "get_full_document"),
@@ -124,26 +152,27 @@ describe("TimelineWorkspace", () => {
     });
 
     await waitFor(() => {
-      expect(
-        invoke.mock.calls.some(
-          ([command, args]) =>
-            command === "handle_edit" &&
-            JSON.stringify(args) ===
-              JSON.stringify({
-                payload: {
-                  base_version: 3,
-                  ops: [{ type: "insert", position: 8, text: " update" }],
-                },
-              }),
-        ),
-      ).toBe(true);
+      const call = invoke.mock.calls.find(([command]) => command === "handle_edit");
+      expect(call).toBeDefined();
+      if (!call) {
+        return;
+      }
+      const [, args] = call;
+      expect(args).toEqual({
+        payload: {
+          base_version: 3,
+          ops: computeOperations("Original", "Original update"),
+        },
+      });
     });
 
     await waitFor(() => {
       const editors = screen.getAllByTestId("mock-editor");
       expect(editors.at(-1)?.textContent).toBe("Canonical document");
     });
-  });  it("opens and closes the collaborative session view", async () => {
+  });
+
+  it("opens and closes the collaborative session view", async () => {
     const today = new Date().toISOString().slice(0, 10);
     const invoke = vi.fn(
       async (command: string, args?: Record<string, unknown>) => {
@@ -159,10 +188,18 @@ describe("TimelineWorkspace", () => {
       },
     );
 
-    render(<TimelineWorkspace invokeApi={invoke} EditorComponent={StubEditor} ChatPaneComponent={StubChatPane} />);
+    render(
+      <TimelineWorkspace
+        invokeApi={invoke}
+        EditorComponent={StubEditor}
+        ChatPaneComponent={StubChatPane}
+      />,
+    );
 
     await waitFor(() => {
-      expect(screen.getByTestId("timeline-main-view").textContent).toBe("Initial doc");
+      expect(screen.getByTestId("timeline-main-view").textContent).toBe(
+        "Initial doc",
+      );
     });
 
     const reflectButton = screen.getByTestId("reflect-button");
@@ -185,10 +222,10 @@ describe("TimelineWorkspace", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("timeline-main-view").textContent).toBe("Initial doc");
+      expect(screen.getByTestId("timeline-main-view").textContent).toBe(
+        "Initial doc",
+      );
     });
     expect(screen.queryByTestId("collaborative-session-view")).toBeNull();
   });
-
-
 });
