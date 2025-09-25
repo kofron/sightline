@@ -29,15 +29,36 @@ export interface TimelineEditorProps {
   document_content: string;
   on_change?: (ops: TextOperation[], nextText: string) => void;
   register_editor?: (editor: LexicalEditor) => void;
+  scroll_container_ref?: React.RefObject<HTMLDivElement>;
+  scroll_to_bottom?: boolean;
 }
 
 export function TimelineEditor({
   document_content,
   on_change,
   register_editor,
+  scroll_container_ref,
+  scroll_to_bottom,
 }: TimelineEditorProps) {
   const initialContentRef = useRef(document_content);
   const externalTextRef = useRef(document_content);
+  // Scroll to bottom when requested
+  useEffect(() => {
+    if (scroll_to_bottom && scroll_container_ref?.current) {
+      setTimeout(() => {
+        const container = scroll_container_ref.current;
+        if (container) {
+          const contentEditable = container.querySelector('.timeline-editor__content');
+          if (contentEditable) {
+            contentEditable.scrollTo({
+              top: contentEditable.scrollHeight,
+              behavior: 'smooth'
+            });
+          }
+        }
+      }, 200);
+    }
+  }, [scroll_to_bottom, scroll_container_ref]);
 
   const initialConfig = useMemo(
     () => ({
@@ -178,7 +199,7 @@ function setEditorMarkdown(markdown: string) {
 }
 
 function normalizeMarkdown(markdown: string): string {
-  return markdown.replaceAll('\r\n', '\n');
+  return markdown.replace(/\r\n/g, '\n');
 }
 
 export default TimelineEditor;
