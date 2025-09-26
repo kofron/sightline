@@ -22,11 +22,23 @@ The v0 is a **single-device, local-first application** designed to prove the cor
       * **Direct Jump:** A keyboard shortcut allows users to jump directly to any date.
 
 
+#### How dates work
+
+Every edit you make in sightline is associated with a date.  The dates are persisted on the backend and flow through to the frontend, such that at any moment in time you can see what date the text is associated with.
+
+There's a special slash-command, /today, that will insert today's date.
+
+You can also hit cmd+k to open the command palette and use the focus command to jump to a specific date:
+focus date:sept 9 will take you to the 9th, for example.
+
+
 #### Tagging
 
 When editing text, at any point in a line (except the beginning!) you can hit # to start tagging a piece of text.  The interactive tag selector will pop up, and from there you can choose a pre-existing tag or create a new one.  The search supports both prefix and infix-style searching.  If you start editing a previously tagged region, the chooser will pop back up for you.
 
 Every tag is assigned a color, and tagged text will appear colored by the tag color.
+
+You can "focus" on everything that has been tagged with a specific tag by using the command palette and focus on the tag.  For example focus tag:#home will narrow the editor to show you everything that is home (and all of its descendents), irrespective of date.  focus tag:#home date:sept 9 will focus on home and that specific date, for example.
 
 Coming soon: tag editor!
 
