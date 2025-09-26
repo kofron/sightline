@@ -351,15 +351,17 @@ function TimelineWorkspaceInner({
           containerRef={editorRef}
           documentContent={documentContent}
         />
-        <Editor
-          document_content={documentContent}
-          on_change={handleEditorChange}
-          scroll_container_ref={editorRef}
-          scroll_to_bottom={isInitialized && isAtToday}
-          plugins={
-            <TagPlugin invokeApi={invokeFn} refreshBlocks={refreshBlocks} />
-          }
-        />
+        <div className="flex-1 min-h-0 pl-16">
+          <Editor
+            document_content={documentContent}
+            on_change={handleEditorChange}
+            scroll_container_ref={editorRef}
+            scroll_to_bottom={isInitialized && isAtToday}
+            plugins={
+              <TagPlugin invokeApi={invokeFn} refreshBlocks={refreshBlocks} />
+            }
+          />
+        </div>
 
         {/* Reflect button - bottom right when ready */}
         {reflectState === 'ready' && (

@@ -1,7 +1,6 @@
 import { useLayoutEffect, useMemo, useState } from "react";
 import type { MutableRefObject, RefObject } from "react";
 
-import { Badge } from "./ui/badge";
 import type { BlockMetadata } from "@/lib/block-store";
 
 interface DateMarker {
@@ -192,18 +191,18 @@ export default function DateGutterOverlay({
   }
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-30">
+    <div className="pointer-events-none absolute inset-y-0 left-0 z-30 w-16 border-r border-white/5 bg-transparent">
       {markers.map((marker) => {
         const top = positions[marker.id] ?? 0;
         return (
           <div
             key={marker.id}
-            className="absolute left-4"
+            className="absolute left-3"
             style={{ top }}
           >
-            <Badge variant="secondary" className="text-xs uppercase tracking-wide">
+            <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-400">
               {formatShortDate(marker.date)}
-            </Badge>
+            </span>
           </div>
         );
       })}
