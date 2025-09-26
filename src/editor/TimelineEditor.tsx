@@ -63,7 +63,10 @@ export interface TimelineEditorProps {
   document_content: string;
   on_change?: (ops: TextOperation[], nextText: string) => void;
   register_editor?: (editor: LexicalEditor) => void;
-  scroll_container_ref?: React.RefObject<HTMLDivElement>;
+  scroll_container_ref?:
+    | React.RefObject<HTMLDivElement>
+    | React.RefObject<HTMLDivElement | null>
+    | React.MutableRefObject<HTMLDivElement | null>;
   scroll_to_bottom?: boolean;
   plugins?: ReactNode;
 }

@@ -4,7 +4,8 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import TimelineEditor from "../editor/TimelineEditor";
 import ChatPane, { type ChatPaneProps } from "./ChatPane";
 import { Button } from "./ui/button";
-import { Badge } from "./ui/badge";
+import DateGutterOverlay from "./DateGutterOverlay";
+import CommandPalette from "./CommandPalette";
 import type { DocumentSnapshot, TextOperation } from "../api/types";
 import TimelineSyncController, {
   type InvokeFn,
@@ -33,6 +34,7 @@ interface BackendBlockMetadata {
     index: number;
     start_offset: number;
     end_offset: number;
+    date: string;
     tags?: number[];
 }
 
@@ -41,6 +43,7 @@ function mapBackendBlock(descriptor: BackendBlockMetadata): BlockMetadata {
     index: descriptor.index,
     startOffset: descriptor.start_offset,
     endOffset: descriptor.end_offset,
+    date: descriptor.date,
     tags: descriptor.tags ?? [],
   };
 }
@@ -97,7 +100,6 @@ function TimelineWorkspaceInner({
   const [isSessionLoading, setIsSessionLoading] = useState(false);
   const [isDailyLogEmpty, setIsDailyLogEmpty] = useState(true);
   const [currentDate, setCurrentDate] = useState<string>(formatDateForDisplay(new Date()));
-  const [isAtToday, setIsAtToday] = useState(true);
   const editorRef = useRef<HTMLDivElement>(null);
 
   const latestDocumentRef = useRef("");
@@ -106,10 +108,45 @@ function TimelineWorkspaceInner({
 
   const Editor = EditorComponent ?? TimelineEditor;
   const ChatPaneView = ChatPaneComponent ?? ChatPane;
+  const isAtToday = useMemo(
+    () => currentDate === formatDateForDisplay(new Date()),
+    [currentDate],
+  );
 
   const invokeFn = useMemo(() => invokeApi, [invokeApi]);
   const { replaceAll: replaceAllTags } = useTagStore();
-  const { replaceAll: replaceAllBlocks } = useBlockStore();
+  const { replaceAll: replaceAllBlocks, blocks } = useBlockStore();
+
+  useEffect(() => {
+    if (blocks.length === 0) {
+      return;
+    }
+
+    const [first] = blocks;
+    if (!first?.date) {
+      return;
+    }
+
+    const parts = first.date.split("-");
+    if (parts.length !== 3) {
+      return;
+    }
+
+    const [yearPart, monthPart, dayPart] = parts;
+    const year = Number.parseInt(yearPart, 10);
+    const month = Number.parseInt(monthPart, 10);
+    const day = Number.parseInt(dayPart, 10);
+
+    if (Number.isNaN(year) || Number.isNaN(month) || Number.isNaN(day)) {
+      return;
+    }
+
+    const date = new Date(Date.UTC(year, month - 1, day));
+    const formatted = formatDateForDisplay(date);
+    if (formatted !== currentDate) {
+      setCurrentDate(formatted);
+    }
+  }, [blocks, currentDate]);
 
   const refreshBlocks = useCallback(() => {
     invokeFn<BackendBlockMetadata[]>("list_blocks")
@@ -288,21 +325,9 @@ function TimelineWorkspaceInner({
     setIsSessionLoading(false);
   }, []);
 
-  const jumpToToday = useCallback(() => {
-    // TODO: Scroll to bottom of timeline
-    setIsAtToday(true);
-    setCurrentDate(formatDateForDisplay(new Date()));
-    setReflectState('ready');
-  }, []);
-
-  // Check if we're viewing today when content changes
   useEffect(() => {
-    // This is a simplified check - in reality you'd parse the document
-    // to determine what date range is currently visible
-    const today = formatDateForDisplay(new Date());
-    setIsAtToday(currentDate === today);
-    setReflectState(currentDate === today ? 'ready' : 'hidden');
-  }, [currentDate]);
+    setReflectState(isAtToday ? 'ready' : 'hidden');
+  }, [isAtToday]);
 
   return (
     <div
@@ -313,31 +338,19 @@ function TimelineWorkspaceInner({
       data-initialized={isInitialized}
       data-testid="timeline-main-view"
     >
-      {/* Left sidebar - Date indicator */}
-      <div className="w-20 border-r border-border bg-card flex flex-col">
-        <div className="flex-1 flex flex-col justify-end p-4 gap-2">
-          <Badge
-            variant="secondary"
-            className="rotate-90 origin-center whitespace-nowrap text-xs"
-          >
-            {currentDate}
-          </Badge>
-        </div>
-        <div className="p-4">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={jumpToToday}
-            className="w-full text-xs"
-            disabled={isAtToday}
-          >
-            Today
-          </Button>
-        </div>
-      </div>
-
-      {/* Center editor - 80% width */}
       <div className="flex-1 flex flex-col relative min-h-0" ref={editorRef}>
+        <CommandPalette
+          onReflect={openReflectSession}
+          onToday={() => {
+            // TODO: Scroll handling for today
+            setCurrentDate(formatDateForDisplay(new Date()));
+          }}
+        />
+        <DateGutterOverlay
+          blocks={blocks}
+          containerRef={editorRef}
+          documentContent={documentContent}
+        />
         <Editor
           document_content={documentContent}
           on_change={handleEditorChange}

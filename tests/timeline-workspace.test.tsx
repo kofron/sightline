@@ -33,6 +33,7 @@ function handleCommonCommands(command: string, args?: Record<string, unknown>) {
         index: 0,
         start_offset: 0,
         end_offset: length,
+        date: "2024-01-01",
         tags: [] as number[],
       },
     ];
@@ -58,7 +59,11 @@ function handleCommonCommands(command: string, args?: Record<string, unknown>) {
 function StubEditor({ document_content, on_change }: TimelineEditorProps) {
   editorState.onChange = on_change ?? null;
   editorState.content = document_content;
-  return <div data-testid="mock-editor">{document_content}</div>;
+  return (
+    <div data-testid="mock-editor" className="timeline-editor">
+      <div className="timeline-editor__content">{document_content}</div>
+    </div>
+  );
 }
 
 function StubChatPane() {
@@ -274,4 +279,5 @@ describe("TimelineWorkspace", () => {
     });
     expect(screen.queryByTestId("collaborative-session-view")).toBeNull();
   });
+
 });

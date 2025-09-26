@@ -11,6 +11,7 @@ export interface BlockMetadata {
   index: number;
   startOffset: number;
   endOffset: number;
+  date: string;
   tags: number[];
 }
 

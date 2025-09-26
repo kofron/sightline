@@ -403,12 +403,14 @@ fn list_blocks_command_returns_ranges() {
         index: u32,
         start_offset: u32,
         end_offset: u32,
+        date: String,
         #[allow(dead_code)]
         tags: Vec<u32>,
     }
 
     let blocks: Vec<BlockMetadata> = serde_json::from_value(response).expect("block list");
     assert!(!blocks.is_empty());
+    assert_eq!(blocks[0].date, "2024-01-01");
     assert!(blocks
         .windows(2)
         .all(|pair| pair[0].end_offset <= pair[1].start_offset));

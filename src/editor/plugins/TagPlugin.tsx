@@ -258,11 +258,6 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
     );
   }, [editor, activeSelection, suggestions, selectedIndex, confirmTag]);
 
-  // confirmTag defined earlier
-
-  // indirection to satisfy dependency ordering for the key handler effect
-  const confirmTagRef = useMemo(() => ({ current: confirmTag }), [confirmTag]);
-
   const portal =
     activeSelection && menuRect && suggestions.length > 0
       ? createPortal(

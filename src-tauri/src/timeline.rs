@@ -83,6 +83,7 @@ pub struct BlockMetadata {
     pub index: u32,
     pub start_offset: u32,
     pub end_offset: u32,
+    pub date: String,
     #[serde(default)]
     pub tags: Vec<u32>,
 }
@@ -911,6 +912,7 @@ impl Timeline {
                 index: u32::try_from(index).unwrap_or(u32::MAX),
                 start_offset: start,
                 end_offset: end,
+                date: block.date.to_string(),
                 tags: block.tags.clone(),
             });
             offset = end;
