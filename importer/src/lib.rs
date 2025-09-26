@@ -119,9 +119,8 @@ fn collect_journal_entries(
             .and_then(OsStr::to_str)
             .ok_or_else(|| anyhow!("journal entry '{}' has an invalid name", path.display()))?;
 
-        let date = parse_journal_date(file_stem).with_context(|| {
-            format!("failed to parse date from journal entry '{}'.md", file_stem)
-        })?;
+        let date = parse_journal_date(file_stem)
+            .with_context(|| format!("failed to parse date from journal entry '{file_stem}'.md"))?;
 
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read journal entry '{}'", path.display()))?;
@@ -240,7 +239,7 @@ fn parse_journal_date(name: &str) -> Result<NaiveDate> {
         }
     }
 
-    Err(anyhow!("unable to parse journal date from '{}'", name))
+    Err(anyhow!("unable to parse journal date from '{name}'"))
 }
 
 fn file_modified_date(path: &Path) -> Result<NaiveDate> {

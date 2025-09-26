@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   $getNodeByKey,
@@ -7,7 +7,7 @@ import {
   $isTextNode,
   COMMAND_PRIORITY_HIGH,
   KEY_DOWN_COMMAND,
-  TextNode,
+  type TextNode,
   type LexicalCommand,
   type NodeKey,
   type LexicalNode,
@@ -76,14 +76,14 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
     return existing;
   }, [activeSelection, tags]);
 
-  const updateMenuRect = () => {
+  const updateMenuRect = useCallback(() => {
     const selection = window.getSelection();
     if (selection && selection.rangeCount > 0) {
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
       setMenuRect(rect);
     }
-  };
+  }, []);
 
   useEffect(() => {
     return editor.registerUpdateListener(({ editorState }) => {
@@ -128,54 +128,9 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
         updateMenuRect();
       });
     });
-  }, [editor]);
+  }, [editor, updateMenuRect]);
 
-  useEffect(() => {
-    if (!activeSelection) {
-      return;
-    }
-
-    return editor.registerCommand(
-      KEY_DOWN_COMMAND as LexicalCommand<KeyboardEvent>,
-      (event) => {
-        if (!activeSelection || suggestions.length === 0) {
-          return false;
-        }
-
-        if (event.key === "ArrowDown") {
-          event.preventDefault();
-          setSelectedIndex((value) => (value + 1) % suggestions.length);
-          return true;
-        }
-
-        if (event.key === "ArrowUp") {
-          event.preventDefault();
-          setSelectedIndex((value) => (value - 1 + suggestions.length) % suggestions.length);
-          return true;
-        }
-
-        if (event.key === "Tab" || event.key === "Enter") {
-          event.preventDefault();
-          const chosen = suggestions[selectedIndex] ?? suggestions[0];
-          if (chosen) {
-            void confirmTag(chosen);
-          }
-          return true;
-        }
-
-        if (event.key === "Escape") {
-          event.preventDefault();
-          setActiveSelection(null);
-          return true;
-        }
-
-        return false;
-      },
-      COMMAND_PRIORITY_HIGH,
-    );
-  }, [editor, activeSelection, suggestions, selectedIndex, invokeApi]);
-
-  async function confirmTag(item: SuggestionItem): Promise<void> {
+  const confirmTag = useCallback(async (item: SuggestionItem): Promise<void> => {
     if (!activeSelection) {
       return;
     }
@@ -242,7 +197,58 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
     });
 
     setActiveSelection(null);
-  }
+  }, [activeSelection, blocks, editor, invokeApi, refreshBlocks, tags, upsertTags]);
+
+  // Register keyboard handling while a tag is active
+  useEffect(() => {
+    if (!activeSelection) {
+      return;
+    }
+
+    return editor.registerCommand(
+      KEY_DOWN_COMMAND as LexicalCommand<KeyboardEvent>,
+      (event) => {
+        if (!activeSelection || suggestions.length === 0) {
+          return false;
+        }
+
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          setSelectedIndex((value) => (value + 1) % suggestions.length);
+          return true;
+        }
+
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          setSelectedIndex((value) => (value - 1 + suggestions.length) % suggestions.length);
+          return true;
+        }
+
+        if (event.key === "Tab" || event.key === "Enter") {
+          event.preventDefault();
+          const chosen = suggestions[selectedIndex] ?? suggestions[0];
+          if (chosen) {
+            void confirmTag(chosen);
+          }
+          return true;
+        }
+
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setActiveSelection(null);
+          return true;
+        }
+
+        return false;
+      },
+      COMMAND_PRIORITY_HIGH,
+    );
+  }, [editor, activeSelection, suggestions, selectedIndex, confirmTag]);
+
+  // confirmTag defined earlier
+
+  // indirection to satisfy dependency ordering for the key handler effect
+  const confirmTagRef = useMemo(() => ({ current: confirmTag }), [confirmTag]);
 
   const portal =
     activeSelection && menuRect && suggestions.length > 0
@@ -263,7 +269,7 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
   return portal;
 }
 
-function extractTagContext(node: TextNode, text: string, cursorOffset: number) {
+function extractTagContext(_node: TextNode, text: string, cursorOffset: number) {
   if (cursorOffset === 0) {
     return null;
   }
@@ -284,8 +290,10 @@ function extractTagContext(node: TextNode, text: string, cursorOffset: number) {
     return null;
   }
 
-  const precedingChar = start > 0 ? text[start - 1] : null;
-  if (precedingChar && precedingChar !== " " && precedingChar !== "\n") {
+  const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+  const linePrefix = text.substring(lineStart, start);
+  const hasNonHeadingContent = linePrefix.replace(/#/g, "").trim().length > 0;
+  if (!hasNonHeadingContent) {
     return null;
   }
 

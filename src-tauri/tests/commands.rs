@@ -296,7 +296,9 @@ fn intern_tag_command_creates_and_persists() {
     let response = invoke_command(&webview, "intern_tag", json!({"tag": "#focus:deep"}));
 
     #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
     struct Descriptor {
+        #[allow(dead_code)]
         id: u32,
         name: String,
         color: String,
@@ -337,6 +339,7 @@ fn assign_block_tags_command_updates_block() {
 
     #[derive(serde::Deserialize)]
     struct Descriptor {
+        #[allow(dead_code)]
         id: u32,
         name: String,
         color: String,
@@ -373,6 +376,7 @@ fn list_tags_command_returns_descriptors() {
 
     #[derive(serde::Deserialize)]
     struct Descriptor {
+        #[allow(dead_code)]
         id: u32,
         name: String,
         color: String,
@@ -393,10 +397,13 @@ fn list_blocks_command_returns_ranges() {
     let response = invoke_command(&webview, "list_blocks", json!({}));
 
     #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
     struct BlockMetadata {
+        #[allow(dead_code)]
         index: u32,
         start_offset: u32,
         end_offset: u32,
+        #[allow(dead_code)]
         tags: Vec<u32>,
     }
 

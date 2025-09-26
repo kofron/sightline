@@ -98,7 +98,7 @@ function TimelineWorkspaceInner({
   const [isDailyLogEmpty, setIsDailyLogEmpty] = useState(true);
   const [currentDate, setCurrentDate] = useState<string>(formatDateForDisplay(new Date()));
   const [isAtToday, setIsAtToday] = useState(true);
-  const editorRef = useRef<HTMLDivElement>(null!);
+  const editorRef = useRef<HTMLDivElement>(null);
 
   const latestDocumentRef = useRef("");
   const projectedDocumentRef = useRef("");
@@ -171,7 +171,7 @@ function TimelineWorkspaceInner({
       }
       controllerRef.current = null;
     };
-  }, [invokeFn]);
+  }, [invokeFn, refreshBlocks]);
 
   useEffect(() => {
     let cancelled = false;

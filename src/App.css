@@ -299,6 +299,44 @@ body {
     resize: none;
 }
 
+.timeline-editor__paragraph {
+    margin: 0 0 1rem 0;
+}
+
+.timeline-editor__heading {
+    font-weight: 700;
+    line-height: 1.2;
+    margin: 2rem 0 1rem;
+}
+
+.timeline-editor__heading--h1 {
+    font-size: 2.4rem;
+}
+
+.timeline-editor__heading--h2 {
+    font-size: 2rem;
+}
+
+.timeline-editor__heading--h3 {
+    font-size: 1.7rem;
+}
+
+.timeline-editor__heading--h4 {
+    font-size: 1.5rem;
+}
+
+.timeline-editor__heading--h5 {
+    font-size: 1.3rem;
+}
+
+.timeline-editor__heading--h6 {
+    font-size: 1.15rem;
+}
+
+.timeline-editor__text--strikethrough {
+    text-decoration: line-through;
+}
+
 .timeline-editor__content ul,
 .timeline-editor__content ol {
     margin: 0 0 1rem 1.5rem;

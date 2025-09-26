@@ -18,7 +18,7 @@ import {
   $convertToMarkdownString,
   type ElementTransformer,
 } from "@lexical/markdown";
-import { $createParagraphNode, $getRoot, type LexicalEditor } from "lexical";
+import { $createParagraphNode, $getRoot, type EditorThemeClasses, type LexicalEditor } from "lexical";
 
 import type { TextOperation } from "../api/types";
 import computeOperations from "./operations";
@@ -43,6 +43,21 @@ const TAG_MARKDOWN_TRANSFORMER: ElementTransformer = {
 };
 
 const MARKDOWN_TRANSFORMERS = [...TRANSFORMERS, TAG_MARKDOWN_TRANSFORMER];
+
+const TIMELINE_EDITOR_THEME: EditorThemeClasses = {
+  heading: {
+    h1: "timeline-editor__heading timeline-editor__heading--h1",
+    h2: "timeline-editor__heading timeline-editor__heading--h2",
+    h3: "timeline-editor__heading timeline-editor__heading--h3",
+    h4: "timeline-editor__heading timeline-editor__heading--h4",
+    h5: "timeline-editor__heading timeline-editor__heading--h5",
+    h6: "timeline-editor__heading timeline-editor__heading--h6",
+  },
+  paragraph: "timeline-editor__paragraph",
+  text: {
+    strikethrough: "timeline-editor__text--strikethrough",
+  },
+};
 
 export interface TimelineEditorProps {
   document_content: string;
@@ -84,7 +99,7 @@ export function TimelineEditor({
   const initialConfig = useMemo(
     () => ({
       namespace: EDITOR_NAMESPACE,
-      theme: {},
+      theme: TIMELINE_EDITOR_THEME,
       nodes: [HeadingNode, QuoteNode, ListNode, ListItemNode, CodeNode, LinkNode, TagNode],
       onError(error: unknown) {
         throw error;

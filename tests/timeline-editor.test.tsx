@@ -17,7 +17,7 @@ import { $isListNode } from "@lexical/list";
 
 import TimelineEditor from "../src/editor/TimelineEditor";
 import type { TextOperation } from "../src/api/types";
-import computeOperations from "../src/editor/operations";
+// import computeOperations from "../src/editor/operations";
 
 describe("TimelineEditor", () => {
   it("renders provided document_content", async () => {

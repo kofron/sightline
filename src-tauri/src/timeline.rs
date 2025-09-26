@@ -42,7 +42,7 @@ fn union_tag_filters(target: &mut Bloom<u32>, source: &Bloom<u32>) {
         "tag bloom filters must have matching sizes",
     );
 
-    let bit_bytes = ((target.len() as usize) + 7) / 8;
+    let bit_bytes = (target.len() as usize).div_ceil(8);
     let header_len = target_bytes.len() - bit_bytes;
 
     for (dst, src) in target_bytes[header_len..]
@@ -876,7 +876,7 @@ impl Timeline {
 
         block.tags = tag_ids;
 
-        self.tree = SumTree::from_iter(blocks.into_iter(), ());
+        self.tree = SumTree::from_iter(blocks, ());
 
         Ok(descriptors)
     }
@@ -1449,7 +1449,7 @@ mod tests {
 
         let tags = match snapshot.tag_registry {
             Some(TagRegistrySnapshot::Hierarchical(tags)) => tags,
-            other => panic!("unexpected tag registry format: {:?}", other),
+            other => panic!("unexpected tag registry format: {other:?}"),
         };
 
         assert_eq!(tags.len(), 2);
