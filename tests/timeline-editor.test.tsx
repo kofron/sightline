@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import type { ReactElement } from "react";
 import {
   $createParagraphNode,
   $createTextNode,
@@ -18,10 +19,20 @@ import { $isListNode } from "@lexical/list";
 import TimelineEditor from "../src/editor/TimelineEditor";
 import type { TextOperation } from "../src/api/types";
 // import computeOperations from "../src/editor/operations";
+import { TagStoreProvider } from "../src/lib/tag-store";
+import { BlockStoreProvider } from "../src/lib/block-store";
+
+function withProviders(component: ReactElement): ReactElement {
+  return (
+    <TagStoreProvider>
+      <BlockStoreProvider>{component}</BlockStoreProvider>
+    </TagStoreProvider>
+  );
+}
 
 describe("TimelineEditor", () => {
   it("renders provided document_content", async () => {
-    render(<TimelineEditor document_content="Hello world" />);
+    render(withProviders(<TimelineEditor document_content="Hello world" />));
 
     await waitFor(() => {
       expect(screen.getByTestId("timeline-editor-content").textContent).toBe(
@@ -34,12 +45,14 @@ describe("TimelineEditor", () => {
     let editor: LexicalEditor | null = null;
 
     render(
-      <TimelineEditor
-        document_content="# Today"
-        register_editor={(instance) => {
-          editor = instance;
-        }}
-      />,
+      withProviders(
+        <TimelineEditor
+          document_content="# Today"
+          register_editor={(instance) => {
+            editor = instance;
+          }}
+        />,
+      ),
     );
 
     await waitFor(() => {
@@ -66,13 +79,15 @@ describe("TimelineEditor", () => {
     let editor: LexicalEditor | null = null;
 
     render(
-      <TimelineEditor
-        document_content=""
-        on_change={onChange}
-        register_editor={(instance) => {
-          editor = instance;
-        }}
-      />,
+      withProviders(
+        <TimelineEditor
+          document_content=""
+          on_change={onChange}
+          register_editor={(instance) => {
+            editor = instance;
+          }}
+        />,
+      ),
     );
 
     await waitFor(() => {
@@ -117,13 +132,15 @@ describe("TimelineEditor", () => {
     let editor: LexicalEditor | null = null;
 
     render(
-      <TimelineEditor
-        document_content="Hello world"
-        on_change={onChange}
-        register_editor={(instance) => {
-          editor = instance;
-        }}
-      />,
+      withProviders(
+        <TimelineEditor
+          document_content="Hello world"
+          on_change={onChange}
+          register_editor={(instance) => {
+            editor = instance;
+          }}
+        />,
+      ),
     );
 
     await waitFor(() => {
@@ -179,13 +196,15 @@ describe("TimelineEditor", () => {
     let editor: LexicalEditor | null = null;
 
     render(
-      <TimelineEditor
-        document_content="- item"
-        on_change={onChange}
-        register_editor={(instance) => {
-          editor = instance;
-        }}
-      />,
+      withProviders(
+        <TimelineEditor
+          document_content="- item"
+          on_change={onChange}
+          register_editor={(instance) => {
+            editor = instance;
+          }}
+        />,
+      ),
     );
 
     await waitFor(() => {

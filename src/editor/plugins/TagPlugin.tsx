@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   $getNodeByKey,
@@ -16,8 +16,9 @@ import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext
 
 import type { InvokeFn } from "../../sync/TimelineSyncController";
 import { useTagStore, type TagDescriptor } from "@/lib/tag-store";
-import { useBlockStore } from "@/lib/block-store";
-import { $createTagNode, $isTagNode } from "../nodes/TagNode";
+import { BlockMetadata, useBlockStore } from "@/lib/block-store";
+
+const TAG_CREATION_COLOR = "rgba(59, 130, 246, 0.2)";
 
 interface ActiveTagSelection {
   nodeKey: NodeKey;
@@ -33,9 +34,41 @@ interface TagPluginProps {
   refreshBlocks: () => void;
 }
 
-interface SuggestionItem {
+export type TagSuggestion = {
   descriptor: TagDescriptor;
   isNew: boolean;
+};
+
+export function buildTagSuggestions(
+  query: string | null,
+  tags: Map<number, TagDescriptor>,
+): TagSuggestion[] {
+  if (query == null) {
+    return [];
+  }
+
+  const normalized = query.toLowerCase();
+  const existing = Array.from(tags.values())
+    .filter((item) => item.name.toLowerCase().includes(normalized))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((descriptor) => ({ descriptor, isNew: false }));
+
+  const alreadyExists = existing.some(
+    (item) => item.descriptor.name.toLowerCase() === `#${normalized}`,
+  );
+
+  if (normalized.length > 0 && !alreadyExists) {
+    existing.unshift({
+      descriptor: {
+        id: -1,
+        name: `#${normalized}`,
+        color: TAG_CREATION_COLOR,
+      },
+      isNew: true,
+    });
+  }
+
+  return existing;
 }
 
 export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
@@ -43,37 +76,13 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
   const { tags, upsert: upsertTags } = useTagStore();
   const { blocks } = useBlockStore();
 
-  const [activeSelection, setActiveSelection] = useState<ActiveTagSelection | null>(null);
+  const [activeSelection, setActiveSelection] =
+    useState<ActiveTagSelection | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [menuRect, setMenuRect] = useState<DOMRect | null>(null);
 
-  const suggestions = useMemo<SuggestionItem[]>(() => {
-    if (!activeSelection) {
-      return [];
-    }
-    const query = activeSelection.query.toLowerCase();
-    const existing = Array.from(tags.values())
-      .filter((item) => item.name.toLowerCase().startsWith(`#${query}`))
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((descriptor) => ({ descriptor, isNew: false }));
-
-    const alreadyExists = existing.some(
-      (item) => item.descriptor.name.toLowerCase() === `#${query}`,
-    );
-
-    if (query.length > 0 && !alreadyExists) {
-      const colorFallback = "rgba(59, 130, 246, 0.2)";
-      existing.unshift({
-        descriptor: {
-          id: -1,
-          name: `#${query}`,
-          color: colorFallback,
-        },
-        isNew: true,
-      });
-    }
-
-    return existing;
+  const suggestions = useMemo<TagSuggestion[]>(() => {
+    return buildTagSuggestions(activeSelection?.query ?? null, tags);
   }, [activeSelection, tags]);
 
   const updateMenuRect = useCallback(() => {
@@ -97,11 +106,6 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
         const anchor = selection.anchor;
         const node = anchor.getNode();
         if (!$isTextNode(node)) {
-          setActiveSelection(null);
-          return;
-        }
-
-        if ($isTagNode(node)) {
           setActiveSelection(null);
           return;
         }
@@ -130,74 +134,81 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
     });
   }, [editor, updateMenuRect]);
 
-  const confirmTag = useCallback(async (item: SuggestionItem): Promise<void> => {
-    if (!activeSelection) {
-      return;
-    }
-
-    const block = findBlockForOffset(activeSelection.absoluteStart, blocks);
-    if (!block) {
-      setActiveSelection(null);
-      return;
-    }
-
-    let descriptor = item.descriptor;
-    if (item.isNew) {
-      descriptor = await invokeApi<TagDescriptor>("intern_tag", {
-        tag: descriptor.name,
-      });
-      upsertTags([descriptor]);
-    }
-
-    const nextTagIds = new Set<number>(block.tags ?? []);
-    if (descriptor.id !== -1) {
-      nextTagIds.add(descriptor.id);
-    }
-
-    const tagNames = Array.from(nextTagIds)
-      .map((id) => tags.get(id)?.name ?? descriptor.name)
-      .filter((name) => name.length > 0);
-
-    if (!tagNames.includes(descriptor.name)) {
-      tagNames.push(descriptor.name);
-    }
-
-    const assigned = await invokeApi<TagDescriptor[]>("assign_block_tags", {
-      blockIndex: block.index,
-      tags: tagNames,
-    });
-
-    upsertTags(assigned);
-    refreshBlocks();
-
-    editor.update(() => {
-      const node = $getNodeByKey(activeSelection.nodeKey);
-      if (!$isTextNode(node)) {
+  const confirmTag = useCallback(
+    async (item: TagSuggestion): Promise<void> => {
+      if (!activeSelection) {
         return;
       }
 
-      let target: TextNode = node;
-      const { startOffset, endOffset } = activeSelection;
-      const size = target.getTextContentSize();
-
-      if (endOffset < size) {
-        target = target.splitText(endOffset)[0];
-      }
-      if (startOffset > 0) {
-        target = target.splitText(startOffset)[1];
+      const block = findBlockForOffset(activeSelection.absoluteStart, blocks);
+      if (!block) {
+        setActiveSelection(null);
+        return;
       }
 
-      const tagNode = $createTagNode({
-        id: descriptor.id,
-        name: descriptor.name,
-        color: descriptor.color,
+      let descriptor = item.descriptor;
+      if (item.isNew) {
+        descriptor = await invokeApi<TagDescriptor>("intern_tag", {
+          tag: descriptor.name,
+        });
+        upsertTags([descriptor]);
+      }
+
+      const nextTagIds = new Set<number>(block.tags ?? []);
+      if (descriptor.id !== -1) {
+        nextTagIds.add(descriptor.id);
+      }
+
+      const tagNames = Array.from(nextTagIds)
+        .map((id) => tags.get(id)?.name ?? descriptor.name)
+        .filter((name) => name.length > 0);
+
+      if (!tagNames.includes(descriptor.name)) {
+        tagNames.push(descriptor.name);
+      }
+
+      const assigned = await invokeApi<TagDescriptor[]>("assign_block_tags", {
+        blockIndex: block.index,
+        tags: tagNames,
       });
-      target.replace(tagNode);
-      tagNode.selectNext();
-    });
 
-    setActiveSelection(null);
-  }, [activeSelection, blocks, editor, invokeApi, refreshBlocks, tags, upsertTags]);
+      upsertTags(assigned);
+      refreshBlocks();
+
+      editor.update(() => {
+        const node = $getNodeByKey(activeSelection.nodeKey);
+        if (!$isTextNode(node)) {
+          return;
+        }
+
+        let target: TextNode = node;
+        const { startOffset, endOffset } = activeSelection;
+        const size = target.getTextContentSize();
+
+        if (endOffset < size) {
+          target = target.splitText(endOffset)[0];
+        }
+        if (startOffset > 0) {
+          target = target.splitText(startOffset)[1];
+        }
+
+        target.setTextContent(descriptor.name);
+        const nextPosition = target.getTextContentSize();
+        target.select(nextPosition, nextPosition);
+      });
+
+      setActiveSelection(null);
+    },
+    [
+      activeSelection,
+      blocks,
+      editor,
+      invokeApi,
+      refreshBlocks,
+      tags,
+      upsertTags,
+    ],
+  );
 
   // Register keyboard handling while a tag is active
   useEffect(() => {
@@ -220,7 +231,9 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
 
         if (event.key === "ArrowUp") {
           event.preventDefault();
-          setSelectedIndex((value) => (value - 1 + suggestions.length) % suggestions.length);
+          setSelectedIndex(
+            (value) => (value - 1 + suggestions.length) % suggestions.length,
+          );
           return true;
         }
 
@@ -269,7 +282,11 @@ export function TagPlugin({ invokeApi, refreshBlocks }: TagPluginProps) {
   return portal;
 }
 
-function extractTagContext(_node: TextNode, text: string, cursorOffset: number) {
+function extractTagContext(
+  node: TextNode,
+  text: string,
+  cursorOffset: number,
+) {
   if (cursorOffset === 0) {
     return null;
   }
@@ -290,8 +307,15 @@ function extractTagContext(_node: TextNode, text: string, cursorOffset: number) 
     return null;
   }
 
-  const lineStart = text.lastIndexOf("\n", start - 1) + 1;
-  const linePrefix = text.substring(lineStart, start);
+  const parent = node.getParent();
+  if (parent == null) {
+    return null;
+  }
+
+  const startWithinParent = computeOffset(node, start, parent);
+  const parentText = parent.getTextContent();
+  const lineStart = parentText.lastIndexOf("\n", startWithinParent - 1) + 1;
+  const linePrefix = parentText.substring(lineStart, startWithinParent);
   const hasNonHeadingContent = linePrefix.replace(/#/g, "").trim().length > 0;
   if (!hasNonHeadingContent) {
     return null;
@@ -306,30 +330,13 @@ function extractTagContext(_node: TextNode, text: string, cursorOffset: number) 
 }
 
 function computeAbsoluteOffset(node: TextNode, relativeOffset: number): number {
-  let total = relativeOffset;
-  let current: LexicalNode = node;
-
-  while (true) {
-    const parent = current.getParent();
-    if (parent == null) {
-      break;
-    }
-
-    const siblings = parent.getChildren();
-    for (const sibling of siblings) {
-      if (sibling === current) {
-        break;
-      }
-      total += sibling.getTextContentSize();
-    }
-
-    current = parent;
-  }
-
-  return total;
+  return computeOffset(node, relativeOffset);
 }
 
-function findBlockForOffset(offset: number, blocks: BlockMetadata[]): BlockMetadata | null {
+function findBlockForOffset(
+  offset: number,
+  blocks: BlockMetadata[],
+): BlockMetadata | null {
   for (const block of blocks) {
     if (offset >= block.startOffset && offset <= block.endOffset) {
       return block;
@@ -348,7 +355,7 @@ function AutocompletePopover({
   onSelect,
 }: {
   rect: DOMRect;
-  suggestions: SuggestionItem[];
+  suggestions: TagSuggestion[];
   selectedIndex: number;
   onSelect: (index: number) => void;
 }) {
@@ -375,7 +382,9 @@ function AutocompletePopover({
               style={{ backgroundColor: item.descriptor.color }}
             />
             <span>{item.descriptor.name}</span>
-            {item.isNew && <span style={{ color: "rgba(59, 130, 246, 0.8)" }}>Create</span>}
+            {item.isNew && (
+              <span style={{ color: "rgba(59, 130, 246, 0.8)" }}>Create</span>
+            )}
           </li>
         ))}
       </ul>
@@ -384,3 +393,36 @@ function AutocompletePopover({
 }
 
 export default TagPlugin;
+export { extractTagContext };
+
+function computeOffset(
+  node: LexicalNode,
+  relativeOffset: number,
+  boundary?: LexicalNode | null,
+): number {
+  let total = relativeOffset;
+  let current: LexicalNode = node;
+
+  while (true) {
+    const parent = current.getParent();
+    if (parent == null) {
+      break;
+    }
+
+    const siblings = parent.getChildren();
+    for (const sibling of siblings) {
+      if (sibling === current) {
+        break;
+      }
+      total += sibling.getTextContentSize();
+    }
+
+    if (parent === boundary) {
+      break;
+    }
+
+    current = parent;
+  }
+
+  return total;
+}

@@ -21,6 +21,15 @@ The v0 is a **single-device, local-first application** designed to prove the cor
       * **Exploratory Scrolling:** Users can infinitely scroll up from the current day to seamlessly navigate into their past logs.
       * **Direct Jump:** A keyboard shortcut allows users to jump directly to any date.
 
+
+#### Tagging
+
+When editing text, at any point in a line (except the beginning!) you can hit # to start tagging a piece of text.  The interactive tag selector will pop up, and from there you can choose a pre-existing tag or create a new one.  The search supports both prefix and infix-style searching.  If you start editing a previously tagged region, the chooser will pop back up for you.
+
+Every tag is assigned a color, and tagged text will appear colored by the tag color.
+
+Coming soon: tag editor!
+
 ### Scope & Limitations for v0
 
   * **Local-Only:** v0 will not have user accounts, cloud sync, or multi-device support. The user's **Timeline** is stored as a single file on their local device.

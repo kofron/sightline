@@ -3,6 +3,7 @@ import type { MutableRefObject } from "react";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
 import { ContentEditable } from "@lexical/react/LexicalContentEditable";
 import { RichTextPlugin } from "@lexical/react/LexicalRichTextPlugin";
+import { CheckListPlugin } from "@lexical/react/LexicalCheckListPlugin";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { MarkdownShortcutPlugin } from "@lexical/react/LexicalMarkdownShortcutPlugin";
 import { ListPlugin } from "@lexical/react/LexicalListPlugin";
@@ -16,33 +17,26 @@ import {
   TRANSFORMERS,
   $convertFromMarkdownString,
   $convertToMarkdownString,
-  type ElementTransformer,
+  CHECK_LIST,
 } from "@lexical/markdown";
-import { $createParagraphNode, $getRoot, type EditorThemeClasses, type LexicalEditor } from "lexical";
+import { HashtagNode } from "@lexical/hashtag";
+import {
+  $createParagraphNode,
+  $getRoot,
+  type EditorThemeClasses,
+  type LexicalEditor,
+} from "lexical";
 
 import type { TextOperation } from "../api/types";
 import computeOperations from "./operations";
-import { TagNode, $isTagNode } from "./nodes/TagNode";
+import HierarchicalHashtagPlugin from "./plugins/HierarchicalHashtagPlugin";
+import HashtagColorPlugin from "./plugins/HashtagColorPlugin";
 
 const EDITOR_NAMESPACE = "SightlineTimelineEditor";
 const DEBOUNCELESS_PLACEHOLDER = null;
-const TAG_MARKDOWN_TRANSFORMER: ElementTransformer = {
-  dependencies: [TagNode],
-  export: (node) => {
-    if ($isTagNode(node)) {
-      return node.getTextContent();
-    }
-    return null;
-  },
-  regExp: /^$/,
-  replace: () => {
-    // Import side intentionally left empty. Tag nodes are created explicitly
-    // during tagging flows; legacy markdown remains plain text.
-  },
-  type: "element",
-};
-
-const MARKDOWN_TRANSFORMERS = [...TRANSFORMERS, TAG_MARKDOWN_TRANSFORMER];
+const MARKDOWN_TRANSFORMERS = Array.from(
+  new Set([...TRANSFORMERS, CHECK_LIST]),
+);
 
 const TIMELINE_EDITOR_THEME: EditorThemeClasses = {
   heading: {
@@ -54,6 +48,12 @@ const TIMELINE_EDITOR_THEME: EditorThemeClasses = {
     h6: "timeline-editor__heading timeline-editor__heading--h6",
   },
   paragraph: "timeline-editor__paragraph",
+  hashtag: "timeline-editor__hashtag",
+  list: {
+    listitemChecked:
+      "timeline-editor__checklist-item timeline-editor__checklist-item--checked",
+    listitemUnchecked: "timeline-editor__checklist-item",
+  },
   text: {
     strikethrough: "timeline-editor__text--strikethrough",
   },
@@ -84,11 +84,13 @@ export function TimelineEditor({
       setTimeout(() => {
         const container = scroll_container_ref.current;
         if (container) {
-          const contentEditable = container.querySelector('.timeline-editor__content');
+          const contentEditable = container.querySelector(
+            ".timeline-editor__content",
+          );
           if (contentEditable) {
             contentEditable.scrollTo({
               top: contentEditable.scrollHeight,
-              behavior: 'smooth'
+              behavior: "smooth",
             });
           }
         }
@@ -100,7 +102,15 @@ export function TimelineEditor({
     () => ({
       namespace: EDITOR_NAMESPACE,
       theme: TIMELINE_EDITOR_THEME,
-      nodes: [HeadingNode, QuoteNode, ListNode, ListItemNode, CodeNode, LinkNode, TagNode],
+      nodes: [
+        HeadingNode,
+        QuoteNode,
+        ListNode,
+        ListItemNode,
+        CodeNode,
+        LinkNode,
+        HashtagNode,
+      ],
       onError(error: unknown) {
         throw error;
       },
@@ -135,7 +145,10 @@ export function TimelineEditor({
           ErrorBoundary={LexicalErrorBoundary}
         />
         <HistoryPlugin />
+        <CheckListPlugin />
         <ListPlugin />
+        <HierarchicalHashtagPlugin />
+        <HashtagColorPlugin />
         <MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />
         {plugins}
       </LexicalComposer>
@@ -182,7 +195,11 @@ function ChangeListenerPlugin({
   useEffect(() => {
     return editor.registerUpdateListener(({ editorState, tags }) => {
       const nextMarkdown = editorState.read(() => {
-        const markdown = $convertToMarkdownString(MARKDOWN_TRANSFORMERS, undefined, true);
+        const markdown = $convertToMarkdownString(
+          MARKDOWN_TRANSFORMERS,
+          undefined,
+          true,
+        );
         return normalizeMarkdown(markdown);
       });
 
@@ -228,7 +245,12 @@ function setEditorMarkdown(markdown: string) {
   const normalized = normalizeMarkdown(markdown);
   const root = $getRoot();
   root.clear();
-  $convertFromMarkdownString(normalized, MARKDOWN_TRANSFORMERS, undefined, true);
+  $convertFromMarkdownString(
+    normalized,
+    MARKDOWN_TRANSFORMERS,
+    undefined,
+    true,
+  );
 
   if (root.getFirstChild() === null) {
     root.append($createParagraphNode());
@@ -236,7 +258,7 @@ function setEditorMarkdown(markdown: string) {
 }
 
 function normalizeMarkdown(markdown: string): string {
-  return markdown.replace(/\r\n/g, '\n');
+  return markdown.replace(/\r\n/g, "\n");
 }
 
 export default TimelineEditor;
