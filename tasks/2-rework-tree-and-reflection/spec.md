@@ -6,8 +6,9 @@ This plan outlines the work to refactor the core data model to a flexible taggin
 
 * **TaggedBlock structure**: Each block keeps `date: NaiveDate`, `text: String`, and `tags: Vec<u32>`. Dates stay first-class metadata.
 * **TimelineSummary dates**: Continue tracking `min_date`/`max_date`; Bloom filters augment tag lookups only.
-* **Snapshot format**: Persist as `{ version, blocks: [TaggedBlock], tag_registry: [Tag] }` where `Tag { id, name, parent_id }`; continue accepting the legacy `{ id -> "path" }` map when loading.
+* **Snapshot format**: Persist as `{ version, blocks: [TaggedBlock], tag_registry: [Tag] }` where `Tag { id, name, parent_id, color? }`; continue accepting the legacy `{ id -> "path" }` map when loading.
 * **Importer CLI**: Workspace now owns a standalone `importer` binary crate that reuses the shared registry helpers; `--source` and `--output` are required, the tool walks `/journal` and `/projects`, applies `#type:journal` / `#type:project-note` tags, builds hierarchical `project:*` tags from directory paths, and emits the new `{ blocks, tag_registry }` snapshot format.
+* **Tag autocomplete**: Backend `autocomplete_tag` now returns structured suggestions of `{ name, color? }`, enabling the UI to surface palette metadata alongside tag names.
 * **Today editor**: Reuse existing `TimelineEditor`; parent fetches today’s content via `get_log_for_date`.
 * **Chat events**: Use `chat-message`/`chat-response` names; backend echo listener satisfies PoC.
 * **Initial prompt copy**: Return a short, user-facing string (e.g., friendly greeting) rather than LLM payload.

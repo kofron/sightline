@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import type { MutableRefObject } from "react";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
 import { ContentEditable } from "@lexical/react/LexicalContentEditable";
@@ -16,14 +16,33 @@ import {
   TRANSFORMERS,
   $convertFromMarkdownString,
   $convertToMarkdownString,
+  type ElementTransformer,
 } from "@lexical/markdown";
 import { $createParagraphNode, $getRoot, type LexicalEditor } from "lexical";
 
 import type { TextOperation } from "../api/types";
 import computeOperations from "./operations";
+import { TagNode, $isTagNode } from "./nodes/TagNode";
 
 const EDITOR_NAMESPACE = "SightlineTimelineEditor";
 const DEBOUNCELESS_PLACEHOLDER = null;
+const TAG_MARKDOWN_TRANSFORMER: ElementTransformer = {
+  dependencies: [TagNode],
+  export: (node) => {
+    if ($isTagNode(node)) {
+      return node.getTextContent();
+    }
+    return null;
+  },
+  regExp: /^$/,
+  replace: () => {
+    // Import side intentionally left empty. Tag nodes are created explicitly
+    // during tagging flows; legacy markdown remains plain text.
+  },
+  type: "element",
+};
+
+const MARKDOWN_TRANSFORMERS = [...TRANSFORMERS, TAG_MARKDOWN_TRANSFORMER];
 
 export interface TimelineEditorProps {
   document_content: string;
@@ -31,6 +50,7 @@ export interface TimelineEditorProps {
   register_editor?: (editor: LexicalEditor) => void;
   scroll_container_ref?: React.RefObject<HTMLDivElement>;
   scroll_to_bottom?: boolean;
+  plugins?: ReactNode;
 }
 
 export function TimelineEditor({
@@ -39,6 +59,7 @@ export function TimelineEditor({
   register_editor,
   scroll_container_ref,
   scroll_to_bottom,
+  plugins,
 }: TimelineEditorProps) {
   const initialContentRef = useRef(document_content);
   const externalTextRef = useRef(document_content);
@@ -64,7 +85,7 @@ export function TimelineEditor({
     () => ({
       namespace: EDITOR_NAMESPACE,
       theme: {},
-      nodes: [HeadingNode, QuoteNode, ListNode, ListItemNode, CodeNode, LinkNode],
+      nodes: [HeadingNode, QuoteNode, ListNode, ListItemNode, CodeNode, LinkNode, TagNode],
       onError(error: unknown) {
         throw error;
       },
@@ -100,7 +121,8 @@ export function TimelineEditor({
         />
         <HistoryPlugin />
         <ListPlugin />
-        <MarkdownShortcutPlugin transformers={TRANSFORMERS} />
+        <MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />
+        {plugins}
       </LexicalComposer>
     </div>
   );
@@ -145,7 +167,7 @@ function ChangeListenerPlugin({
   useEffect(() => {
     return editor.registerUpdateListener(({ editorState, tags }) => {
       const nextMarkdown = editorState.read(() => {
-        const markdown = $convertToMarkdownString(TRANSFORMERS, undefined, true);
+        const markdown = $convertToMarkdownString(MARKDOWN_TRANSFORMERS, undefined, true);
         return normalizeMarkdown(markdown);
       });
 
@@ -191,7 +213,7 @@ function setEditorMarkdown(markdown: string) {
   const normalized = normalizeMarkdown(markdown);
   const root = $getRoot();
   root.clear();
-  $convertFromMarkdownString(normalized, TRANSFORMERS, undefined, true);
+  $convertFromMarkdownString(normalized, MARKDOWN_TRANSFORMERS, undefined, true);
 
   if (root.getFirstChild() === null) {
     root.append($createParagraphNode());

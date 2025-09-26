@@ -62,7 +62,11 @@ fn build_test_app() -> (
             commands::get_log_for_date,
             commands::search_prefix,
             commands::search_infix,
-            commands::autocomplete_tag
+            commands::autocomplete_tag,
+            commands::intern_tag,
+            commands::assign_block_tags,
+            commands::list_tags,
+            commands::list_blocks
         ])
         .build(mock_context(noop_assets()))
         .expect("failed to build app");
@@ -265,8 +269,140 @@ fn autocomplete_tag_command_returns_canonical_tags() {
     let (_app, webview) = build_test_app();
     let response = invoke_command(&webview, "autocomplete_tag", json!({"query": "#pro"}));
 
-    let tags: Vec<String> = serde_json::from_value(response).expect("parse tag list");
-    assert!(tags.contains(&"#project".to_string()));
-    assert!(tags.contains(&"#project:sightline".to_string()));
-    assert!(tags.contains(&"#project:home".to_string()));
+    #[derive(serde::Deserialize)]
+    struct Suggestion {
+        name: String,
+        #[serde(default)]
+        color: Option<String>,
+    }
+
+    let tags: Vec<Suggestion> = serde_json::from_value(response).expect("parse tag list");
+    let names: Vec<_> = tags
+        .iter()
+        .map(|suggestion| suggestion.name.as_str())
+        .collect();
+    assert!(names.contains(&"#project"));
+    assert!(names.contains(&"#project:sightline"));
+    assert!(names.contains(&"#project:home"));
+    assert!(tags.iter().all(|suggestion| suggestion.color.is_some()));
+}
+
+#[test]
+fn intern_tag_command_creates_and_persists() {
+    let env_guard = TimelineEnvGuard::new();
+
+    let (_app, webview) = build_test_app();
+
+    let response = invoke_command(&webview, "intern_tag", json!({"tag": "#focus:deep"}));
+
+    #[derive(serde::Deserialize)]
+    struct Descriptor {
+        id: u32,
+        name: String,
+        color: String,
+    }
+
+    let descriptor: Descriptor = serde_json::from_value(response).expect("parse descriptor");
+    assert!(descriptor.id >= 1);
+    assert_eq!(descriptor.name, "#focus:deep");
+    assert!(!descriptor.color.is_empty());
+
+    // Ensure the timeline snapshot persisted the new tag
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(env_guard.path()).expect("read timeline"))
+            .expect("parse snapshot");
+    let tag_registry = snapshot
+        .get("tag_registry")
+        .and_then(|value| value.as_array())
+        .expect("tag registry array");
+    assert!(tag_registry
+        .iter()
+        .any(|tag| { tag.get("name").and_then(|name| name.as_str()) == Some("deep") }));
+}
+
+#[test]
+fn assign_block_tags_command_updates_block() {
+    let env_guard = TimelineEnvGuard::new();
+    write_search_snapshot(env_guard.path());
+
+    let (_app, webview) = build_test_app();
+    let response = invoke_command(
+        &webview,
+        "assign_block_tags",
+        json!({
+            "blockIndex": 1,
+            "tags": ["#project:home", "type:journal"]
+        }),
+    );
+
+    #[derive(serde::Deserialize)]
+    struct Descriptor {
+        id: u32,
+        name: String,
+        color: String,
+    }
+
+    let descriptors: Vec<Descriptor> = serde_json::from_value(response).expect("descriptor list");
+    assert_eq!(descriptors.len(), 2);
+    assert!(descriptors.iter().all(|d| d.id > 0));
+    assert!(descriptors.iter().all(|d| !d.color.is_empty()));
+    assert!(descriptors.iter().any(|d| d.name == "#project:home"));
+
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(env_guard.path()).expect("read timeline"))
+            .expect("parse snapshot");
+    let blocks = snapshot
+        .get("blocks")
+        .and_then(|value| value.as_array())
+        .expect("blocks array");
+    let second = blocks.get(1).expect("second block");
+    let tags = second
+        .get("tags")
+        .and_then(|value| value.as_array())
+        .expect("block tags");
+    assert_eq!(tags.len(), 2);
+}
+
+#[test]
+fn list_tags_command_returns_descriptors() {
+    let env_guard = TimelineEnvGuard::new();
+    write_search_snapshot(env_guard.path());
+
+    let (_app, webview) = build_test_app();
+    let response = invoke_command(&webview, "list_tags", json!({}));
+
+    #[derive(serde::Deserialize)]
+    struct Descriptor {
+        id: u32,
+        name: String,
+        color: String,
+    }
+
+    let descriptors: Vec<Descriptor> = serde_json::from_value(response).expect("descriptor list");
+    assert!(!descriptors.is_empty());
+    assert!(descriptors.iter().all(|d| d.name.starts_with('#')));
+    assert!(descriptors.iter().all(|d| !d.color.is_empty()));
+}
+
+#[test]
+fn list_blocks_command_returns_ranges() {
+    let env_guard = TimelineEnvGuard::new();
+    write_search_snapshot(env_guard.path());
+
+    let (_app, webview) = build_test_app();
+    let response = invoke_command(&webview, "list_blocks", json!({}));
+
+    #[derive(serde::Deserialize)]
+    struct BlockMetadata {
+        index: u32,
+        start_offset: u32,
+        end_offset: u32,
+        tags: Vec<u32>,
+    }
+
+    let blocks: Vec<BlockMetadata> = serde_json::from_value(response).expect("block list");
+    assert!(!blocks.is_empty());
+    assert!(blocks
+        .windows(2)
+        .all(|pair| pair[0].end_offset <= pair[1].start_offset));
 }

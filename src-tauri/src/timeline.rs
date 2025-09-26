@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::{cmp, env};
 
-use crate::api::TextOperation;
+use crate::{api::TextOperation, tag_palette};
 use bloomfilter::Bloom;
 use chrono::NaiveDate;
 use dirs::config_dir;
@@ -60,6 +60,31 @@ pub struct Tag {
     pub id: u32,
     pub name: String,
     pub parent_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagSuggestion {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagDescriptor {
+    pub id: u32,
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockMetadata {
+    pub index: u32,
+    pub start_offset: u32,
+    pub end_offset: u32,
+    #[serde(default)]
+    pub tags: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -165,23 +190,32 @@ impl TagRegistry {
         self.filter_tag_ids(query, |name, normalized| name.contains(normalized))
     }
 
-    pub fn autocomplete_names(&self, query: &str) -> Vec<String> {
+    pub fn autocomplete(&self, query: &str) -> Vec<TagSuggestion> {
         let normalized = Self::normalize_query(query);
         if normalized.is_empty() {
             return Vec::new();
         }
 
-        let mut names: Vec<String> = self
+        let mut suggestions: Vec<TagSuggestion> = self
             .tag_names()
             .into_iter()
-            .map(|(_, name)| name)
-            .filter(|name| name.to_lowercase().starts_with(&normalized))
-            .map(|name| format!("#{name}"))
+            .filter_map(|(id, name)| {
+                let lower = name.to_lowercase();
+                if !lower.starts_with(&normalized) {
+                    return None;
+                }
+
+                let color = self.tags.get(&id).and_then(|tag| tag.color.clone());
+                Some(TagSuggestion {
+                    name: format!("#{name}"),
+                    color,
+                })
+            })
             .collect();
 
-        names.sort();
-        names.dedup();
-        names
+        suggestions.sort_by(|a, b| a.name.cmp(&b.name));
+        suggestions.dedup_by(|a, b| a.name == b.name);
+        suggestions
     }
 
     fn filter_tag_ids<F>(&self, query: &str, predicate: F) -> Vec<u32>
@@ -238,6 +272,7 @@ impl TagRegistry {
             id,
             name: name_string.clone(),
             parent_id,
+            color: Some(tag_palette::color_for(id).to_string()),
         };
         self.tags.insert(id, tag);
         self.index
@@ -306,6 +341,7 @@ impl TagRegistry {
             index: HashMap::new(),
             next_id: 0,
         };
+        registry.ensure_tag_colors();
         registry.rebuild_indexes();
         registry
     }
@@ -332,6 +368,16 @@ impl TagRegistry {
             .max()
             .map(|max| max.wrapping_add(1))
             .unwrap_or(0);
+
+        self.ensure_tag_colors();
+    }
+
+    fn ensure_tag_colors(&mut self) {
+        for (id, tag) in self.tags.iter_mut() {
+            if tag.color.is_none() {
+                tag.color = Some(tag_palette::color_for(*id).to_string());
+            }
+        }
     }
 }
 
@@ -654,6 +700,24 @@ pub enum ApplyOpsError {
     InvalidRange { start: usize, end: usize },
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum InternTagError {
+    #[error("tag name cannot be empty")]
+    Empty,
+    #[error("tag must contain at least one valid segment")]
+    Invalid,
+    #[error("failed to resolve canonical name for tag id {0}")]
+    MissingName(u32),
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AssignBlockTagsError {
+    #[error("block index {index} out of range")]
+    InvalidBlock { index: usize },
+    #[error(transparent)]
+    Intern(#[from] InternTagError),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TimelinePersistenceError {
     #[error("config directory unavailable")]
@@ -748,8 +812,110 @@ impl Timeline {
         self.block_ids_with_tags(&tag_ids)
     }
 
-    pub fn autocomplete_tags(&self, query: &str) -> Vec<String> {
-        self.tag_registry.autocomplete_names(query)
+    pub fn autocomplete_tags(&self, query: &str) -> Vec<TagSuggestion> {
+        self.tag_registry.autocomplete(query)
+    }
+
+    pub fn intern_tag(&mut self, raw: &str) -> Result<TagDescriptor, InternTagError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(InternTagError::Empty);
+        }
+
+        let normalized = trimmed.trim_start_matches('#').trim();
+        if normalized.is_empty() {
+            return Err(InternTagError::Invalid);
+        }
+
+        let tag_id = self
+            .tag_registry
+            .intern_colon_path(normalized)
+            .ok_or(InternTagError::Invalid)?;
+
+        let tag = self
+            .tag_registry
+            .get_tag(tag_id)
+            .cloned()
+            .ok_or(InternTagError::MissingName(tag_id))?;
+
+        let full_name = self
+            .tag_registry
+            .full_name(tag_id)
+            .ok_or(InternTagError::MissingName(tag_id))?;
+
+        let color = tag
+            .color
+            .clone()
+            .unwrap_or_else(|| tag_palette::color_for(tag_id).to_string());
+
+        Ok(TagDescriptor {
+            id: tag_id,
+            name: format!("#{full_name}"),
+            color,
+        })
+    }
+
+    pub fn assign_block_tags(
+        &mut self,
+        block_index: usize,
+        tags: &[String],
+    ) -> Result<Vec<TagDescriptor>, AssignBlockTagsError> {
+        let mut blocks: Vec<TaggedBlock> = self.tree.iter().cloned().collect();
+        let block = blocks
+            .get_mut(block_index)
+            .ok_or(AssignBlockTagsError::InvalidBlock { index: block_index })?;
+
+        let mut descriptors = Vec::new();
+        let mut tag_ids = Vec::new();
+
+        for tag in tags {
+            let descriptor = self.intern_tag(tag)?;
+            tag_ids.push(descriptor.id);
+            descriptors.push(descriptor);
+        }
+
+        block.tags = tag_ids;
+
+        self.tree = SumTree::from_iter(blocks.into_iter(), ());
+
+        Ok(descriptors)
+    }
+
+    pub fn list_tags(&self) -> Vec<TagDescriptor> {
+        let mut descriptors = Vec::new();
+        for tag in self.tag_registry.iter() {
+            if let Some(name) = self.tag_registry.full_name(tag.id) {
+                let color = tag
+                    .color
+                    .clone()
+                    .unwrap_or_else(|| tag_palette::color_for(tag.id).to_string());
+                descriptors.push(TagDescriptor {
+                    id: tag.id,
+                    name: format!("#{name}"),
+                    color,
+                });
+            }
+        }
+        descriptors.sort_by(|a, b| a.name.cmp(&b.name));
+        descriptors
+    }
+
+    pub fn list_blocks(&self) -> Vec<BlockMetadata> {
+        let mut metadata = Vec::new();
+        let mut offset: u32 = 0;
+        for (index, block) in self.tree.iter().enumerate() {
+            let char_count = u32::try_from(block.char_count()).unwrap_or(u32::MAX);
+            let start = offset;
+            let end = offset.saturating_add(char_count);
+            metadata.push(BlockMetadata {
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+                start_offset: start,
+                end_offset: end,
+                tags: block.tags.clone(),
+            });
+            offset = end;
+        }
+        metadata
     }
 
     pub fn apply_ops(
@@ -1421,7 +1587,7 @@ mod tests {
     }
 
     #[test]
-    fn autocomplete_tags_returns_canonical_strings() {
+    fn autocomplete_tags_returns_suggestions() {
         let mut registry = TagRegistry::new();
         let project = registry.intern_segment(None, "project");
         let _sightline = registry.intern_segment(Some(project), "sightline");
@@ -1437,12 +1603,130 @@ mod tests {
         };
 
         let results = timeline.autocomplete_tags("#pro");
-        assert!(results.contains(&"#project".to_string()));
-        assert!(results.contains(&"#project:sightline".to_string()));
-        assert!(results.contains(&"#project:strategy".to_string()));
+        let names: Vec<_> = results
+            .iter()
+            .map(|suggestion| suggestion.name.as_str())
+            .collect();
+        assert!(names.contains(&"#project"));
+        assert!(names.contains(&"#project:sightline"));
+        assert!(names.contains(&"#project:strategy"));
+        assert!(results.iter().all(|suggestion| suggestion.color.is_some()));
 
         let type_results = timeline.autocomplete_tags("#type:j");
-        assert_eq!(type_results, vec!["#type:journal".to_string()]);
+        assert_eq!(
+            type_results
+                .iter()
+                .map(|suggestion| suggestion.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["#type:journal"]
+        );
+        assert!(type_results
+            .iter()
+            .all(|suggestion| suggestion.color.is_some()));
+    }
+
+    #[test]
+    fn intern_tag_creates_and_reuses_entries() {
+        let mut timeline = Timeline::default();
+
+        let first = timeline
+            .intern_tag("#project:new")
+            .expect("create project tag");
+        assert_eq!(first.name, "#project:new");
+        assert_eq!(first.id, 1);
+        assert!(!first.color.is_empty());
+
+        let reused = timeline
+            .intern_tag("project:new")
+            .expect("reuse existing tag");
+        assert_eq!(reused.id, first.id);
+        assert_eq!(reused.name, first.name);
+
+        let other = timeline
+            .intern_tag("type:journal")
+            .expect("create second tag");
+        assert_ne!(other.id, first.id);
+        assert!(other.name.starts_with("#type"));
+    }
+
+    #[test]
+    fn intern_tag_rejects_invalid_input() {
+        let mut timeline = Timeline::default();
+        assert_eq!(timeline.intern_tag("   "), Err(InternTagError::Empty));
+        assert_eq!(timeline.intern_tag("#"), Err(InternTagError::Invalid));
+    }
+
+    #[test]
+    fn assign_block_tags_updates_block() {
+        let mut timeline = Timeline::default();
+        timeline
+            .apply_ops(
+                0,
+                &[TextOperation::Insert {
+                    position: 0,
+                    text: "entry one\n".to_string(),
+                }],
+            )
+            .expect("insert first entry");
+        let position = timeline.summary().total_chars;
+        timeline
+            .apply_ops(
+                1,
+                &[TextOperation::Insert {
+                    position,
+                    text: "entry two".to_string(),
+                }],
+            )
+            .expect("insert second entry");
+
+        let descriptors = timeline
+            .assign_block_tags(
+                1,
+                &["#project:alpha".to_string(), "type:journal".to_string()],
+            )
+            .expect("assign tags");
+
+        assert_eq!(descriptors.len(), 2);
+        let block = timeline.tree.iter().nth(1).expect("second block");
+        assert_eq!(block.tags.len(), 2);
+    }
+
+    #[test]
+    fn assign_block_tags_rejects_invalid_index() {
+        let mut timeline = Timeline::default();
+        let error = timeline.assign_block_tags(0, &[]).unwrap_err();
+        assert_eq!(error, AssignBlockTagsError::InvalidBlock { index: 0 });
+    }
+
+    #[test]
+    fn list_blocks_returns_offsets() {
+        let mut timeline = Timeline::default();
+        timeline
+            .apply_ops(
+                0,
+                &[TextOperation::Insert {
+                    position: 0,
+                    text: "alpha\n".to_string(),
+                }],
+            )
+            .expect("insert first block");
+        let position = timeline.summary().total_chars;
+        timeline
+            .apply_ops(
+                1,
+                &[TextOperation::Insert {
+                    position,
+                    text: "beta".to_string(),
+                }],
+            )
+            .expect("insert second block");
+
+        let blocks = timeline.list_blocks();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].start_offset, 0);
+        assert_eq!(blocks[0].end_offset, 6);
+        assert_eq!(blocks[1].start_offset, blocks[0].end_offset);
+        assert_eq!(blocks[1].end_offset, blocks[1].start_offset + 4);
     }
 
     #[test]

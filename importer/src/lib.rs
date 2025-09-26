@@ -370,6 +370,12 @@ mod tests {
 
         assert_eq!(snapshot.version, 0);
         assert_eq!(snapshot.blocks.len(), 2);
+        assert!(
+            snapshot
+                .tag_registry
+                .iter()
+                .all(|tag| tag.color.as_ref().is_some())
+        );
 
         let tag_names = build_tag_name_map(&snapshot.tag_registry);
 

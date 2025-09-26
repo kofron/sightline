@@ -131,5 +131,5 @@
 **Ticket 11: Implement Brute-Force Autocomplete Search**
 * **Goal:** Provide a list of matching tags as the user types.
 * **Acceptance Criteria:**
-    * A new Tauri command `autocomplete_tag(query: String) -> Vec<String>` is created.
-    * A unit test asserts that `autocomplete_tag("#pro")` returns a `Vec` containing the string `"#project:sightline"`.
+    * A new Tauri command `autocomplete_tag(query: String) -> Vec<TagSuggestion>` is created, where each suggestion includes a `name` and optional `color`.
+    * A unit test asserts that `autocomplete_tag("#pro")` returns structured suggestions containing `"#project:sightline"` and other canonical tags.

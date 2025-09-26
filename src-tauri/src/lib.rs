@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 pub mod api;
 pub mod chat;
+mod tag_palette;
 pub mod timeline;
 
 pub struct AppState {
@@ -106,9 +107,59 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub fn autocomplete_tag(state: State<AppState>, query: String) -> Result<Vec<String>, String> {
+    pub fn autocomplete_tag(
+        state: State<AppState>,
+        query: String,
+    ) -> Result<Vec<timeline::TagSuggestion>, String> {
         let timeline = state.get_timeline();
         Ok(timeline.autocomplete_tags(&query))
+    }
+
+    #[tauri::command]
+    pub fn intern_tag(
+        state: State<AppState>,
+        tag: String,
+    ) -> Result<timeline::TagDescriptor, String> {
+        let mut timeline = state.get_timeline();
+        let descriptor = timeline.intern_tag(&tag).map_err(|err| err.to_string())?;
+
+        if let Err(err) = timeline.save() {
+            tracing::warn!(?err, "failed to save timeline after interning tag");
+            return Err(err.to_string());
+        }
+
+        Ok(descriptor)
+    }
+
+    #[tauri::command]
+    pub fn assign_block_tags(
+        state: State<AppState>,
+        block_index: u32,
+        tags: Vec<String>,
+    ) -> Result<Vec<timeline::TagDescriptor>, String> {
+        let mut timeline = state.get_timeline();
+        let descriptors = timeline
+            .assign_block_tags(block_index as usize, &tags)
+            .map_err(|err| err.to_string())?;
+
+        if let Err(err) = timeline.save() {
+            tracing::warn!(?err, "failed to save timeline after assigning block tags");
+            return Err(err.to_string());
+        }
+
+        Ok(descriptors)
+    }
+
+    #[tauri::command]
+    pub fn list_tags(state: State<AppState>) -> Result<Vec<timeline::TagDescriptor>, String> {
+        let timeline = state.get_timeline();
+        Ok(timeline.list_tags())
+    }
+
+    #[tauri::command]
+    pub fn list_blocks(state: State<AppState>) -> Result<Vec<timeline::BlockMetadata>, String> {
+        let timeline = state.get_timeline();
+        Ok(timeline.list_blocks())
     }
 }
 
@@ -129,7 +180,11 @@ pub fn run() {
             commands::get_log_for_date,
             commands::search_prefix,
             commands::search_infix,
-            commands::autocomplete_tag
+            commands::autocomplete_tag,
+            commands::intern_tag,
+            commands::assign_block_tags,
+            commands::list_tags,
+            commands::list_blocks
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

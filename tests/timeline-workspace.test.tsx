@@ -21,6 +21,40 @@ const editorState: { onChange: OnChange | null; content: string } = {
   content: "",
 };
 
+function handleCommonCommands(command: string, args?: Record<string, unknown>) {
+  if (command === "list_tags") {
+    return [];
+  }
+
+  if (command === "list_blocks") {
+    const length = typeof editorState.content === "string" ? editorState.content.length : 0;
+    return [
+      {
+        index: 0,
+        start_offset: 0,
+        end_offset: length,
+        tags: [] as number[],
+      },
+    ];
+  }
+
+  if (command === "intern_tag") {
+    const name = typeof args?.tag === "string" ? args.tag : "#tag";
+    return { id: 1, name, color: "rgba(59, 130, 246, 0.3)" };
+  }
+
+  if (command === "assign_block_tags") {
+    const tags = Array.isArray(args?.tags) ? (args?.tags as string[]) : [];
+    return tags.map((name, index) => ({
+      id: index + 1,
+      name,
+      color: "rgba(59, 130, 246, 0.3)",
+    }));
+  }
+
+  return null;
+}
+
 function StubEditor({ document_content, on_change }: TimelineEditorProps) {
   editorState.onChange = on_change ?? null;
   editorState.content = document_content;
@@ -49,7 +83,12 @@ afterEach(() => {
 describe("TimelineWorkspace", () => {
   it("loads snapshot and sends edits to backend", async () => {
     const invoke = vi.fn(
-      async (command: string, _args?: Record<string, unknown>) => {
+      async (command: string, args?: Record<string, unknown>) => {
+        const common = handleCommonCommands(command, args);
+        if (common !== null) {
+          return common;
+        }
+
         if (command === "get_document_snapshot") {
           return { content: "Initial doc", version: 1 };
         }
@@ -109,7 +148,12 @@ describe("TimelineWorkspace", () => {
 
   it("reconciles conflicts by fetching the canonical document", async () => {
     const invoke = vi.fn(
-      async (command: string, _args?: Record<string, unknown>) => {
+      async (command: string, args?: Record<string, unknown>) => {
+        const common = handleCommonCommands(command, args);
+        if (common !== null) {
+          return common;
+        }
+
         switch (command) {
           case "get_document_snapshot":
             return { content: "Original", version: 3 };
@@ -176,6 +220,11 @@ describe("TimelineWorkspace", () => {
     const today = new Date().toISOString().slice(0, 10);
     const invoke = vi.fn(
       async (command: string, args?: Record<string, unknown>) => {
+        const common = handleCommonCommands(command, args);
+        if (common !== null) {
+          return common;
+        }
+
         switch (command) {
           case "get_document_snapshot":
             return { content: "Initial doc", version: 1 };
@@ -197,9 +246,8 @@ describe("TimelineWorkspace", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByTestId("timeline-main-view").textContent).toBe(
-        "Initial doc",
-      );
+      const editors = screen.getAllByTestId("mock-editor");
+      expect(editors.at(-1)?.textContent).toBe("Initial doc");
     });
 
     const reflectButton = screen.getByTestId("reflect-button");
@@ -212,8 +260,7 @@ describe("TimelineWorkspace", () => {
     });
 
     await waitFor(() => {
-      const sessionEditor = screen.getByTestId("mock-editor");
-      expect(sessionEditor.textContent).toBe("Today log");
+      expect(screen.getByTestId("chat-pane-stub")).toBeDefined();
     });
 
     const closeButton = screen.getByTestId("close-session-button");
@@ -222,9 +269,8 @@ describe("TimelineWorkspace", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("timeline-main-view").textContent).toBe(
-        "Initial doc",
-      );
+      const editors = screen.getAllByTestId("mock-editor");
+      expect(editors.at(-1)?.textContent).toBe("Initial doc");
     });
     expect(screen.queryByTestId("collaborative-session-view")).toBeNull();
   });

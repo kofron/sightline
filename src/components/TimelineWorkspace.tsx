@@ -11,11 +11,38 @@ import TimelineSyncController, {
 } from "../sync/TimelineSyncController";
 import computeOperations from "../editor/operations";
 import { cn } from "@/lib/utils";
+import {
+  TagStoreProvider,
+  useTagStore,
+  type TagDescriptor,
+} from "@/lib/tag-store";
+import {
+  BlockStoreProvider,
+  useBlockStore,
+  type BlockMetadata,
+} from "@/lib/block-store";
+import TagPlugin from "../editor/plugins/TagPlugin";
 
 interface TimelineWorkspaceProps {
   invokeApi?: InvokeFn;
   EditorComponent?: typeof TimelineEditor;
   ChatPaneComponent?: ComponentType<ChatPaneProps>;
+}
+
+interface BackendBlockMetadata {
+    index: number;
+    start_offset: number;
+    end_offset: number;
+    tags?: number[];
+}
+
+function mapBackendBlock(descriptor: BackendBlockMetadata): BlockMetadata {
+  return {
+    index: descriptor.index,
+    startOffset: descriptor.start_offset,
+    endOffset: descriptor.end_offset,
+    tags: descriptor.tags ?? [],
+  };
 }
 
 const defaultInvoke: InvokeFn = (command, args) =>
@@ -45,6 +72,24 @@ export function TimelineWorkspace({
   EditorComponent,
   ChatPaneComponent,
 }: TimelineWorkspaceProps) {
+  return (
+    <TagStoreProvider>
+      <BlockStoreProvider>
+        <TimelineWorkspaceInner
+          invokeApi={invokeApi}
+          EditorComponent={EditorComponent}
+          ChatPaneComponent={ChatPaneComponent}
+        />
+      </BlockStoreProvider>
+    </TagStoreProvider>
+  );
+}
+
+function TimelineWorkspaceInner({
+  invokeApi = defaultInvoke,
+  EditorComponent,
+  ChatPaneComponent,
+}: TimelineWorkspaceProps) {
   const controllerRef = useRef<TimelineSyncController | null>(null);
   const [documentContent, setDocumentContent] = useState("");
   const [isInitialized, setIsInitialized] = useState(false);
@@ -63,6 +108,19 @@ export function TimelineWorkspace({
   const ChatPaneView = ChatPaneComponent ?? ChatPane;
 
   const invokeFn = useMemo(() => invokeApi, [invokeApi]);
+  const { replaceAll: replaceAllTags } = useTagStore();
+  const { replaceAll: replaceAllBlocks } = useBlockStore();
+
+  const refreshBlocks = useCallback(() => {
+    invokeFn<BackendBlockMetadata[]>("list_blocks")
+      .then((metadata) => {
+        replaceAllBlocks(metadata.map(mapBackendBlock));
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("failed to list blocks", message);
+      });
+  }, [invokeFn, replaceAllBlocks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -95,6 +153,7 @@ export function TimelineWorkspace({
           },
         });
         setIsInitialized(true);
+        refreshBlocks();
       })
       .catch((err) => {
         if (cancelled) {
@@ -113,6 +172,34 @@ export function TimelineWorkspace({
       controllerRef.current = null;
     };
   }, [invokeFn]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    invokeFn<TagDescriptor[]>("list_tags")
+      .then((descriptors) => {
+        if (!cancelled) {
+          replaceAllTags(descriptors);
+        }
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("failed to list tags", message);
+      });
+
+    return () => {
+      cancelled = true;
+      // TODO: When the backend can stream block/tag diffs, replace this
+      // eager fetch with an incremental patch to keep contexts aligned
+      // without redundant full-state requests.
+    };
+  }, [invokeFn, replaceAllTags]);
+
+  useEffect(() => {
+    refreshBlocks();
+    // TODO: Swap this eager fetch with diff-based updates once the backend
+    // can emit block change deltas (bounded context alignment).
+  }, [refreshBlocks]);
 
   const flushPendingOperations = useCallback(() => {
     const controller = controllerRef.current;
@@ -134,13 +221,14 @@ export function TimelineWorkspace({
       .handleEditorChange(operations)
       .then(() => {
         setIsInitialized(true);
+        refreshBlocks();
       })
       .catch((err) => {
         projectedDocumentRef.current = sourceContent;
         const message = err instanceof Error ? err.message : String(err);
         console.error("failed to apply edit", message);
       });
-  }, []);
+  }, [refreshBlocks]);
 
   const scheduleFlush = useCallback(() => {
     if (flushTimeoutRef.current) {
@@ -217,10 +305,14 @@ export function TimelineWorkspace({
   }, [currentDate]);
 
   return (
-    <div className={cn(
+    <div
+      className={cn(
       "h-screen w-screen bg-background text-foreground flex overflow-hidden",
       "dark" // Force dark mode for now
-    )} data-initialized={isInitialized}>
+    )}
+      data-initialized={isInitialized}
+      data-testid="timeline-main-view"
+    >
       {/* Left sidebar - Date indicator */}
       <div className="w-20 border-r border-border bg-card flex flex-col">
         <div className="flex-1 flex flex-col justify-end p-4 gap-2">
@@ -251,6 +343,9 @@ export function TimelineWorkspace({
           on_change={handleEditorChange}
           scroll_container_ref={editorRef}
           scroll_to_bottom={isInitialized && isAtToday}
+          plugins={
+            <TagPlugin invokeApi={invokeFn} refreshBlocks={refreshBlocks} />
+          }
         />
 
         {/* Reflect button - bottom right when ready */}
@@ -297,11 +392,14 @@ function ReflectOverlay({
   isDailyLogEmpty,
 }: ReflectOverlayProps) {
   return (
-    <div className="fixed bottom-20 right-6 z-40 w-[min(28rem,calc(100vw-3rem))] max-h-[85vh]">
+    <div
+      className="fixed bottom-20 right-6 z-40 w-[min(28rem,calc(100vw-3rem))] max-h-[85vh]"
+      data-testid="collaborative-session-view"
+    >
       <div className="rounded-xl border border-border bg-card shadow-2xl flex flex-col overflow-hidden">
         <div className="flex items-center justify-between p-4 border-b border-border">
           <h2 className="font-semibold text-lg">Daily Reflection</h2>
-          <Button variant="ghost" size="sm" onClick={onCancel}>
+          <Button variant="ghost" size="sm" onClick={onCancel} data-testid="close-session-button">
             Close
           </Button>
         </div>
